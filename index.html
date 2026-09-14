@@ -96,6 +96,8 @@ const INDEXES = [
   { code:'1.000001', name:'上证指数', short:'SH' },
   { code:'0.399001', name:'深证成指', short:'SZ' },
   { code:'0.399006', name:'创业板指', short:'CY' },
+  { code:'1.000688', name:'科创50',   short:'KC' },
+  { code:'0.899050', name:'北证50',   short:'BJ' },
 ];
 
 /* ---------- 时钟 ---------- */
@@ -241,7 +243,9 @@ const cache = {}; // secid -> {klines, trends}
 async function renderIndexList(){
   const list = document.getElementById('idx-list');
   list.innerHTML = '';
-  for(const idx of INDEXES){
+
+  // 先把所有行的骨架一次性画出来，再并行发起请求，互不等待
+  const rows = INDEXES.map(idx=>{
     const row = document.createElement('div');
     row.className = 'card idx-row';
     row.innerHTML = `
@@ -251,7 +255,11 @@ async function renderIndexList(){
     `;
     row.onclick = ()=> openDetail(idx);
     list.appendChild(row);
+    return row;
+  });
 
+  await Promise.all(INDEXES.map(async (idx, i)=>{
+    const row = rows[i];
     try{
       const klines = await getDailyKline(idx.code, 60);
       cache[idx.code] = cache[idx.code] || {};
@@ -269,7 +277,7 @@ async function renderIndexList(){
     }catch(e){
       row.querySelector('.pct').textContent = '加载失败';
     }
-  }
+  }));
 }
 
 /* ---------- 详情页（日K / 分时切换） ---------- */
