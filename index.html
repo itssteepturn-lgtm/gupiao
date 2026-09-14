@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="robots" content="noindex, nofollow">
+<title>盘面</title>
+<style>
+  :root{
+    --bg: #0d1117;
+    --panel: #151b23;
+    --line: #232b36;
+    --text: #e6e9ef;
+    --dim: #8891a0;
+    --up: #e5484d;      /* 中国市场习惯：红涨 */
+    --down: #2ea567;    /* 绿跌 */
+    --accent: #4a90e2;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0; padding:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;
+    height:100%; overscroll-behavior-y:none;}
+  #app{max-width:720px; margin:0 auto; padding:14px 14px 40px;}
+
+  header{display:flex; align-items:baseline; justify-content:space-between; padding:6px 2px 16px;}
+  header h1{font-size:19px; font-weight:600; margin:0; letter-spacing:.3px;}
+  #clock{font-size:12px; color:var(--dim); font-variant-numeric:tabular-nums;}
+
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:12px 14px; margin-bottom:10px;}
+  .idx-row{display:flex; align-items:center; gap:12px;}
+  .idx-name{width:64px; flex-shrink:0;}
+  .idx-name .n{font-size:14px; font-weight:600;}
+  .idx-name .c{font-size:11px; color:var(--dim); margin-top:2px;}
+  .idx-chart{flex:1; height:44px;}
+  .idx-price{width:92px; text-align:right; flex-shrink:0;}
+  .idx-price .p{font-size:15px; font-weight:600; font-variant-numeric:tabular-nums;}
+  .idx-price .pct{font-size:12px; margin-top:2px; font-variant-numeric:tabular-nums;}
+  .up{color:var(--up);}
+  .down{color:var(--down);}
+  .flat{color:var(--dim);}
+
+  .section-label{font-size:12px; color:var(--dim); margin:22px 2px 8px; letter-spacing:.5px;}
+
+  #detail{position:fixed; inset:0; background:var(--bg); transform:translateY(100%);
+    transition:transform .28s ease; z-index:10; overflow-y:auto;}
+  #detail.open{transform:translateY(0);}
+  #detail-inner{max-width:720px; margin:0 auto; padding:14px 14px 40px;}
+  .detail-head{display:flex; align-items:center; gap:10px; padding:6px 2px 14px;}
+  .back{font-size:22px; color:var(--text); padding:4px 8px 4px 0; line-height:1;}
+  .detail-head .title{font-size:17px; font-weight:600;}
+  .tabs{display:flex; gap:8px; margin:10px 0 14px;}
+  .tab{font-size:13px; padding:6px 14px; border-radius:8px; background:var(--panel);
+    border:1px solid var(--line); color:var(--dim);}
+  .tab.active{color:var(--text); border-color:var(--accent); background:rgba(74,144,226,.12);}
+  #bigchart{width:100%; height:280px; background:var(--panel); border:1px solid var(--line); border-radius:10px;}
+  .hint{font-size:12px; color:var(--dim); text-align:center; padding:14px 0;}
+  .refresh-tag{font-size:11px; color:var(--dim); text-align:right; padding-top:6px; font-variant-numeric:tabular-nums;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>盘面</h1>
+    <div id="clock">--:--:--</div>
+  </header>
+
+  <div class="section-label">指数</div>
+  <div id="idx-list"></div>
+
+  <div class="section-label" style="margin-top:30px;">说明</div>
+  <div class="hint" style="text-align:left; padding:0 2px;">
+    这是第一阶段原型：指数日K缩略图 + 点进去看分时。数据来自公开行情接口，本页面在你自己的浏览器里直接请求，不经过任何服务器中转。<br><br>
+    如果某条指数显示"加载失败"，多半是行情接口临时抽风或者网络问题，过几秒下拉刷新即可，不代表页面坏了。
+  </div>
+</div>
+
+<div id="detail">
+  <div id="detail-inner">
+    <div class="detail-head">
+      <div class="back" id="back-btn">‹</div>
+      <div class="title" id="detail-title">--</div>
+    </div>
+    <div class="tabs">
+      <div class="tab active" id="tab-day">日K</div>
+      <div class="tab" id="tab-min">分时</div>
+    </div>
+    <canvas id="bigchart"></canvas>
+    <div class="refresh-tag" id="detail-refresh"></div>
+  </div>
+</div>
+
+<script>
+/* ---------- 指数列表 ---------- */
+const INDEXES = [
+  { code:'1.000001', name:'上证指数', short:'SH' },
+  { code:'0.399001', name:'深证成指', short:'SZ' },
+  { code:'0.399006', name:'创业板指', short:'CY' },
+];
+
+/* ---------- 时钟 ---------- */
+function tickClock(){
+  const d = new Date();
+  const p = n => String(n).padStart(2,'0');
+  document.getElementById('clock').textContent =
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+setInterval(tickClock, 1000); tickClock();
+
+/* ---------- 东方财富接口封装 ----------
+   日K:   push2his.eastmoney.com/api/qt/stock/kline/get
+   分时:  push2.eastmoney.com/api/qt/stock/trends2/get
+   两个接口都支持 JSONP(cb=) 跨域调用，浏览器里直接 fetch 一般也允许(CORS开放)，
+   这里用 fetch，若目标环境不允许 CORS 会自动走 JSONP 兜底。
+------------------------------------------------ */
+function fetchJSON(url){
+  return fetch(url, {cache:'no-store'}).then(r => {
+    if(!r.ok) throw new Error('http '+r.status);
+    return r.json();
+  });
+}
+
+// JSONP 兜底（某些网络环境下东方财富对裸 fetch 会拒绝 CORS）
+function fetchJSONP(url){
+  return new Promise((resolve, reject)=>{
+    const cbName = 'jp_' + Math.random().toString(36).slice(2);
+    const script = document.createElement('script');
+    let done = false;
+    window[cbName] = (data)=>{
+      done = true;
+      resolve(data);
+      cleanup();
+    };
+    script.src = url + (url.includes('?')?'&':'?') + 'cb=' + cbName;
+    script.onerror = ()=>{ if(!done){ reject(new Error('jsonp error')); cleanup(); } };
+    document.head.appendChild(script);
+    function cleanup(){
+      setTimeout(()=>{ delete window[cbName]; script.remove(); }, 0);
+    }
+    setTimeout(()=>{ if(!done){ reject(new Error('jsonp timeout')); cleanup(); } }, 8000);
+  });
+}
+
+async function getJSON(url){
+  try{ return await fetchJSON(url); }
+  catch(e){ return await fetchJSONP(url); }
+}
+
+async function getDailyKline(secid, limit=60){
+  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
+    `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
+    `&klt=101&fqt=1&end=20500101&lmt=${limit}`;
+  const data = await getJSON(url);
+  if(!data || !data.data || !data.data.klines) throw new Error('no data');
+  // 每行: 日期,开,收,高,低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
+  return data.data.klines.map(row=>{
+    const f = row.split(',');
+    return { date:f[0], open:+f[1], close:+f[2], high:+f[3], low:+f[4], vol:+f[5] };
+  });
+}
+
+async function getIntraday(secid){
+  const url = `https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}`+
+    `&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
+    `&ndays=1&iscr=0`;
+  const data = await getJSON(url);
+  if(!data || !data.data || !data.data.trends) throw new Error('no data');
+  // 每行: 时间,开,收(当前价),高,低,成交量,成交额,均价
+  return data.data.trends.map(row=>{
+    const f = row.split(',');
+    return { time:f[0].slice(11), price:+f[2], avg:+f[7] };
+  });
+}
+
+/* ---------- 迷你K线绘制（canvas，不依赖第三方库） ---------- */
+function drawMiniKline(canvas, klines){
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  if(!klines || !klines.length) return;
+
+  const highs = klines.map(k=>k.high), lows = klines.map(k=>k.low);
+  const max = Math.max(...highs), min = Math.min(...lows);
+  const range = (max-min) || 1;
+  const n = klines.length;
+  const cw = w/n;
+
+  klines.forEach((k,i)=>{
+    const x = i*cw + cw/2;
+    const up = k.close >= k.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? '#e5484d' : '#2ea567';
+    const yHigh = h - ((k.high-min)/range)*h;
+    const yLow = h - ((k.low-min)/range)*h;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x,yHigh); ctx.lineTo(x,yLow); ctx.stroke();
+    const yO = h - ((k.open-min)/range)*h;
+    const yC = h - ((k.close-min)/range)*h;
+    const bw = Math.max(cw*0.55, 1.5);
+    ctx.fillRect(x-bw/2, Math.min(yO,yC), bw, Math.max(Math.abs(yC-yO),1));
+  });
+}
+
+function drawIntraday(canvas, trends, prevClose){
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  if(!trends || !trends.length) return;
+
+  const prices = trends.map(t=>t.price);
+  const base = prevClose || prices[0];
+  const maxDev = Math.max(...prices.map(p=>Math.abs(p-base)), base*0.005);
+  const max = base+maxDev, min = base-maxDev;
+  const range = (max-min) || 1;
+  const n = prices.length;
+
+  // 基准线（平盘线）
+  const yBase = h - ((base-min)/range)*h;
+  ctx.strokeStyle = '#3a4250'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(0,yBase); ctx.lineTo(w,yBase); ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#4a90e2'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  prices.forEach((p,i)=>{
+    const x = (i/(n-1))*w;
+    const y = h - ((p-min)/range)*h;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+}
+
+/* ---------- 指数列表渲染 ---------- */
+const cache = {}; // secid -> {klines, trends}
+
+async function renderIndexList(){
+  const list = document.getElementById('idx-list');
+  list.innerHTML = '';
+  for(const idx of INDEXES){
+    const row = document.createElement('div');
+    row.className = 'card idx-row';
+    row.innerHTML = `
+      <div class="idx-name"><div class="n">${idx.name}</div><div class="c">${idx.short}</div></div>
+      <canvas class="idx-chart"></canvas>
+      <div class="idx-price"><div class="p">--</div><div class="pct">加载中</div></div>
+    `;
+    row.onclick = ()=> openDetail(idx);
+    list.appendChild(row);
+
+    try{
+      const klines = await getDailyKline(idx.code, 60);
+      cache[idx.code] = cache[idx.code] || {};
+      cache[idx.code].klines = klines;
+      const canvas = row.querySelector('canvas');
+      drawMiniKline(canvas, klines);
+      const last = klines[klines.length-1];
+      const prev = klines[klines.length-2] || last;
+      const pct = ((last.close - prev.close)/prev.close*100);
+      const cls = pct>0.001?'up':pct<-0.001?'down':'flat';
+      row.querySelector('.p').textContent = last.close.toFixed(2);
+      row.querySelector('.p').className = 'p '+cls;
+      row.querySelector('.pct').textContent = (pct>=0?'+':'')+pct.toFixed(2)+'%';
+      row.querySelector('.pct').className = 'pct '+cls;
+    }catch(e){
+      row.querySelector('.pct').textContent = '加载失败';
+    }
+  }
+}
+
+/* ---------- 详情页（日K / 分时切换） ---------- */
+let currentIdx = null;
+let currentMode = 'day';
+
+function openDetail(idx){
+  currentIdx = idx;
+  currentMode = 'day';
+  document.getElementById('detail-title').textContent = idx.name;
+  document.getElementById('detail').classList.add('open');
+  setTab('day');
+}
+
+function setTab(mode){
+  currentMode = mode;
+  document.getElementById('tab-day').classList.toggle('active', mode==='day');
+  document.getElementById('tab-min').classList.toggle('active', mode==='min');
+  loadDetail();
+}
+
+async function loadDetail(){
+  const canvas = document.getElementById('bigchart');
+  const tag = document.getElementById('detail-refresh');
+  const secid = currentIdx.code;
+  try{
+    if(currentMode==='day'){
+      const klines = cache[secid]?.klines || await getDailyKline(secid, 60);
+      drawMiniKline(canvas, klines);
+    }else{
+      const trends = await getIntraday(secid);
+      const klines = cache[secid]?.klines;
+      const prevClose = klines ? klines[klines.length-2]?.close : undefined;
+      drawIntraday(canvas, trends, prevClose);
+    }
+    const d = new Date();
+    const p = n=>String(n).padStart(2,'0');
+    tag.textContent = `更新于 ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }catch(e){
+    tag.textContent = '加载失败，下拉重试';
+  }
+}
+
+document.getElementById('back-btn').onclick = ()=>{
+  document.getElementById('detail').classList.remove('open');
+};
+document.getElementById('tab-day').onclick = ()=> setTab('day');
+document.getElementById('tab-min').onclick = ()=> setTab('min');
+
+// 分时页每 15 秒自动刷新一次（交易时段内有意义，非交易时段刷新也无妨，数据不会变）
+setInterval(()=>{
+  if(document.getElementById('detail').classList.contains('open') && currentMode==='min'){
+    loadDetail();
+  }
+}, 15000);
+
+/* ---------- 启动 ---------- */
+renderIndexList();
+</script>
+</body>
+</html>
