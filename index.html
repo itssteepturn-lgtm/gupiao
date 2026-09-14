@@ -93,11 +93,10 @@
       <div class="back" id="back-btn">‹</div>
       <div class="title" id="detail-title">--</div>
     </div>
-    <div class="tabs">
-      <div class="tab active" id="tab-day">日K</div>
-      <div class="tab" id="tab-min">分时</div>
-    </div>
-    <canvas id="bigchart"></canvas>
+    <div class="section-label" style="margin:4px 2px 8px;">日K</div>
+    <canvas id="chart-day" style="width:100%; height:200px; background:var(--panel); border:1px solid var(--line); border-radius:10px;"></canvas>
+    <div class="section-label" style="margin:20px 2px 8px;">分时</div>
+    <canvas id="chart-min" style="width:100%; height:200px; background:var(--panel); border:1px solid var(--line); border-radius:10px;"></canvas>
     <div class="refresh-tag" id="detail-refresh"></div>
   </div>
 </div>
@@ -368,39 +367,29 @@ document.getElementById('add-btn').onclick = async ()=>{
   }
 };
 
-/* ---------- 详情页（日K / 分时切换） ---------- */
+/* ---------- 详情页（日K + 分时 一起显示） ---------- */
 let currentIdx = null;
-let currentMode = 'day';
 
 function openDetail(idx){
   currentIdx = idx;
-  currentMode = 'day';
   document.getElementById('detail-title').textContent = idx.name;
   document.getElementById('detail').classList.add('open');
-  setTab('day');
-}
-
-function setTab(mode){
-  currentMode = mode;
-  document.getElementById('tab-day').classList.toggle('active', mode==='day');
-  document.getElementById('tab-min').classList.toggle('active', mode==='min');
   loadDetail();
 }
 
 async function loadDetail(){
-  const canvas = document.getElementById('bigchart');
+  const dayCanvas = document.getElementById('chart-day');
+  const minCanvas = document.getElementById('chart-min');
   const tag = document.getElementById('detail-refresh');
   const secid = currentIdx.code;
   try{
-    if(currentMode==='day'){
-      const klines = cache[secid]?.klines || await getDailyKline(secid, 60);
-      drawMiniKline(canvas, klines);
-    }else{
-      const trends = await getIntraday(secid);
-      const klines = cache[secid]?.klines;
-      const prevClose = klines ? klines[klines.length-2]?.close : undefined;
-      drawIntraday(canvas, trends, prevClose);
-    }
+    const klines = cache[secid]?.klines || await getDailyKline(secid, 60);
+    drawMiniKline(dayCanvas, klines);
+
+    const trends = await getIntraday(secid);
+    const prevClose = klines ? klines[klines.length-2]?.close : undefined;
+    drawIntraday(minCanvas, trends, prevClose);
+
     const d = new Date();
     const p = n=>String(n).padStart(2,'0');
     tag.textContent = `更新于 ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
@@ -412,12 +401,10 @@ async function loadDetail(){
 document.getElementById('back-btn').onclick = ()=>{
   document.getElementById('detail').classList.remove('open');
 };
-document.getElementById('tab-day').onclick = ()=> setTab('day');
-document.getElementById('tab-min').onclick = ()=> setTab('min');
 
-// 分时页每 15 秒自动刷新一次（交易时段内有意义，非交易时段刷新也无妨，数据不会变）
+// 详情页打开时，每 15 秒自动刷新分时+日K
 setInterval(()=>{
-  if(document.getElementById('detail').classList.contains('open') && currentMode==='min'){
+  if(document.getElementById('detail').classList.contains('open')){
     loadDetail();
   }
 }, 15000);
