@@ -253,13 +253,14 @@ async function getIntraday(secid){
   });
 }
 
-// 历史某一天的分时（1分钟K线）。免费接口一般只保留最近一段时间的分钟数据，
-// 太久远的日期大概率会拿不到，调用方需要处理"查不到"的情况。
+// 历史某一天的分时（1分钟K线）。用不复权价格（fqt=0）——分时看的是当天真实成交价，
+// 跟复权后的日K不是一回事，混用会导致跟涨跌停边界对不上。
+// 免费接口一般只保留最近一段时间的分钟数据，太久远的日期大概率会拿不到。
 async function getHistoricalIntraday(secid, dateStr){
   const ymd = dateStr.replace(/-/g,'');
   const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
     `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
-    `&klt=1&fqt=1&beg=${ymd}&end=${ymd}&lmt=1000`;
+    `&klt=1&fqt=0&beg=${ymd}&end=${ymd}&lmt=1000`;
   const data = await getJSON(url);
   if(!data || !data.data || !data.data.klines || !data.data.klines.length){
     throw new Error('该日期没有分时数据（可能超出免费接口的保留范围）');
@@ -268,6 +269,24 @@ async function getHistoricalIntraday(secid, dateStr){
     const f = row.split(',');
     return { time:f[0].slice(11), price:+f[2] };
   });
+}
+
+// 不复权的前一交易日收盘价——涨跌停边界必须按真实价格算，不能用复权后的日K收盘价
+async function getPrevCloseUnadjusted(secid, dateStr){
+  const ymd = dateStr.replace(/-/g,'');
+  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
+    `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
+    `&klt=101&fqt=0&end=${ymd}&lmt=2`;
+  const data = await getJSON(url);
+  if(!data || !data.data || !data.data.klines || data.data.klines.length<2){
+    throw new Error('拿不到前收盘价');
+  }
+  const rows = data.data.klines.map(r=>r.split(','));
+  // lmt=2 且 end=选中日：返回 [选中日前一天, 选中日]（如果选中日当天就是end，通常在最后一行）
+  const selectedRow = rows[rows.length-1];
+  const prevRow = rows[rows.length-2];
+  // 保险起见：如果最后一行日期不是选中日，说明选中日不是交易日，直接用最后一行当"前收盘"
+  return selectedRow[0]===ymd || selectedRow[0]===dateStr ? +prevRow[2] : +selectedRow[2];
 }
 
 /* ==========================================================================
@@ -582,11 +601,10 @@ function drawMiniKline(canvas, klines){
   });
 }
 
-// 涨跌停幅度：主板10%，创业板/科创板20%，北交所30%，ST类5%
+// 涨跌停幅度：主板10%（含ST，2026-07-06起ST已从5%统一改为10%），创业板/科创板20%，北交所30%
 function limitPctForStock(code, name){
   if(/^(300|301|688)/.test(code)) return 20;
   if(/^(4|8)/.test(code)) return 30;
-  if(name && name.indexOf('ST')>=0) return 5;
   return 10;
 }
 
@@ -946,8 +964,7 @@ async function loadIntraday(){
       tag.textContent = `更新于 ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }else{
       const bar = dayChartBars[selectedBarIndex];
-      const barIdxInFull = bars.findIndex(b=>b.date===bar.date);
-      const prevClose = barIdxInFull>0 ? bars[barIdxInFull-1].close : undefined;
+      const prevClose = await getPrevCloseUnadjusted(secid, bar.date);
       const trends = await getHistoricalIntraday(secid, bar.date);
       drawIntraday(minCanvas, trends, prevClose, limitPct);
       document.getElementById('intraday-date-tag').textContent = `(${bar.date})`;
