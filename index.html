@@ -68,6 +68,18 @@
   <div class="section-label">指数</div>
   <div id="idx-list"></div>
 
+  <div class="section-label" id="watchlist-label" style="display:flex; justify-content:space-between; align-items:center;">
+    <span>自选股</span>
+    <span id="edit-toggle" style="color:var(--accent); cursor:pointer;">编辑</span>
+  </div>
+  <div id="watch-list"></div>
+  <div class="card" style="display:flex; gap:8px; align-items:center;">
+    <input id="add-code" type="tel" inputmode="numeric" placeholder="输入6位股票代码"
+      style="flex:1; background:transparent; border:none; color:var(--text); font-size:14px; outline:none;">
+    <div id="add-btn" style="color:var(--accent); font-size:14px; padding:4px 8px;">添加</div>
+  </div>
+  <div id="add-msg" class="hint" style="display:none; padding:6px 0 0;"></div>
+
   <div class="section-label" style="margin-top:30px;">说明</div>
   <div class="hint" style="text-align:left; padding:0 2px;">
     这是第一阶段原型：指数日K缩略图 + 点进去看分时。数据来自公开行情接口，本页面在你自己的浏览器里直接请求，不经过任何服务器中转。<br><br>
@@ -237,48 +249,124 @@ function drawIntraday(canvas, trends, prevClose){
   ctx.stroke();
 }
 
-/* ---------- 指数列表渲染 ---------- */
+/* ---------- 通用列表渲染（指数 / 自选股共用） ---------- */
 const cache = {}; // secid -> {klines, trends}
+
+function buildRow(item, container, onClick){
+  const row = document.createElement('div');
+  row.className = 'card idx-row';
+  row.innerHTML = `
+    <div class="idx-name"><div class="n">${item.name}</div><div class="c">${item.short}</div></div>
+    <canvas class="idx-chart"></canvas>
+    <div class="idx-price"><div class="p">--</div><div class="pct">加载中</div></div>
+  `;
+  row.onclick = ()=> onClick(item, row);
+  container.appendChild(row);
+  return row;
+}
+
+async function fillRowQuote(item, row){
+  try{
+    const klines = await getDailyKline(item.code, 60);
+    cache[item.code] = cache[item.code] || {};
+    cache[item.code].klines = klines;
+    const canvas = row.querySelector('canvas');
+    drawMiniKline(canvas, klines);
+    const last = klines[klines.length-1];
+    const prev = klines[klines.length-2] || last;
+    const pct = ((last.close - prev.close)/prev.close*100);
+    const cls = pct>0.001?'up':pct<-0.001?'down':'flat';
+    row.querySelector('.p').textContent = last.close.toFixed(2);
+    row.querySelector('.p').className = 'p '+cls;
+    row.querySelector('.pct').textContent = (pct>=0?'+':'')+pct.toFixed(2)+'%';
+    row.querySelector('.pct').className = 'pct '+cls;
+  }catch(e){
+    row.querySelector('.pct').textContent = '加载失败';
+  }
+}
 
 async function renderIndexList(){
   const list = document.getElementById('idx-list');
   list.innerHTML = '';
+  const rows = INDEXES.map(idx => buildRow(idx, list, openDetail));
+  await Promise.all(INDEXES.map((idx,i)=> fillRowQuote(idx, rows[i])));
+}
 
-  // 先把所有行的骨架一次性画出来，再并行发起请求，互不等待
-  const rows = INDEXES.map(idx=>{
-    const row = document.createElement('div');
-    row.className = 'card idx-row';
-    row.innerHTML = `
-      <div class="idx-name"><div class="n">${idx.name}</div><div class="c">${idx.short}</div></div>
-      <canvas class="idx-chart"></canvas>
-      <div class="idx-price"><div class="p">--</div><div class="pct">加载中</div></div>
-    `;
-    row.onclick = ()=> openDetail(idx);
-    list.appendChild(row);
-    return row;
-  });
+/* ---------- 自选股：存储 + 代码转 secid + 增删 ---------- */
+const WL_KEY = 'stockapp_watchlist_v1';
+function loadWatchlist(){
+  try{ return JSON.parse(localStorage.getItem(WL_KEY)) || []; }
+  catch(e){ return []; }
+}
+function saveWatchlist(list){
+  localStorage.setItem(WL_KEY, JSON.stringify(list));
+}
+let editMode = false;
 
-  await Promise.all(INDEXES.map(async (idx, i)=>{
-    const row = rows[i];
-    try{
-      const klines = await getDailyKline(idx.code, 60);
-      cache[idx.code] = cache[idx.code] || {};
-      cache[idx.code].klines = klines;
-      const canvas = row.querySelector('canvas');
-      drawMiniKline(canvas, klines);
-      const last = klines[klines.length-1];
-      const prev = klines[klines.length-2] || last;
-      const pct = ((last.close - prev.close)/prev.close*100);
-      const cls = pct>0.001?'up':pct<-0.001?'down':'flat';
-      row.querySelector('.p').textContent = last.close.toFixed(2);
-      row.querySelector('.p').className = 'p '+cls;
-      row.querySelector('.pct').textContent = (pct>=0?'+':'')+pct.toFixed(2)+'%';
-      row.querySelector('.pct').className = 'pct '+cls;
-    }catch(e){
-      row.querySelector('.pct').textContent = '加载失败';
+// 6位代码 -> 东方财富 secid（1.=沪市 0.=深市/北交所）
+function codeToSecid(code){
+  if(/^(6|9)/.test(code)) return '1.'+code;       // 沪市主板/科创板/B股
+  if(/^(0|2|3)/.test(code)) return '0.'+code;     // 深市主板/中小板/创业板/B股
+  if(/^(4|8)/.test(code)) return '0.'+code;       // 北交所
+  return null;
+}
+
+async function lookupName(secid){
+  const url = `https://push2.eastmoney.com/api/qt/stock/get?secid=${secid}&fields=f57,f58`;
+  const data = await getJSON(url);
+  if(!data || !data.data) throw new Error('未找到该代码');
+  return data.data.f58;
+}
+
+async function renderWatchlist(){
+  const list = document.getElementById('watch-list');
+  list.innerHTML = '';
+  const wl = loadWatchlist();
+  const rows = wl.map(item => buildRow(item, list, (it, row)=>{
+    if(editMode){
+      if(confirm(`从自选股中删除 ${it.name}？`)){
+        const updated = loadWatchlist().filter(x=>x.code!==it.code);
+        saveWatchlist(updated);
+        renderWatchlist();
+      }
+    }else{
+      openDetail(it);
     }
   }));
+  await Promise.all(wl.map((it,i)=> fillRowQuote(it, rows[i])));
 }
+
+document.getElementById('edit-toggle').onclick = ()=>{
+  editMode = !editMode;
+  document.getElementById('edit-toggle').textContent = editMode ? '完成' : '编辑';
+  document.getElementById('edit-toggle').style.color = editMode ? 'var(--up)' : 'var(--accent)';
+};
+
+document.getElementById('add-btn').onclick = async ()=>{
+  const input = document.getElementById('add-code');
+  const msg = document.getElementById('add-msg');
+  const code = input.value.trim();
+  msg.style.display = 'block';
+  if(!/^\d{6}$/.test(code)){
+    msg.textContent = '请输入6位数字代码';
+    return;
+  }
+  const secid = codeToSecid(code);
+  if(!secid){ msg.textContent = '无法识别的代码格式'; return; }
+  const wl = loadWatchlist();
+  if(wl.some(x=>x.code===secid)){ msg.textContent = '已经在自选股里了'; return; }
+  msg.textContent = '查询中...';
+  try{
+    const name = await lookupName(secid);
+    wl.push({ code: secid, name, short: code });
+    saveWatchlist(wl);
+    input.value = '';
+    msg.style.display = 'none';
+    renderWatchlist();
+  }catch(e){
+    msg.textContent = '没查到这个代码，确认一下是否正确';
+  }
+};
 
 /* ---------- 详情页（日K / 分时切换） ---------- */
 let currentIdx = null;
@@ -336,6 +424,14 @@ setInterval(()=>{
 
 /* ---------- 启动 ---------- */
 renderIndexList();
+renderWatchlist();
+
+// 自选股在主列表可见时，每 20 秒刷新一次价格（分时详情页有自己的15秒刷新，互不影响）
+setInterval(()=>{
+  if(!document.getElementById('detail').classList.contains('open')){
+    renderWatchlist();
+  }
+}, 20000);
 </script>
 </body>
 </html>
