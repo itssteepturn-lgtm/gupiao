@@ -56,6 +56,21 @@
   #bigchart{width:100%; height:280px; background:var(--panel); border:1px solid var(--line); border-radius:10px;}
   .hint{font-size:12px; color:var(--dim); text-align:center; padding:14px 0;}
   .refresh-tag{font-size:11px; color:var(--dim); text-align:right; padding-top:6px; font-variant-numeric:tabular-nums;}
+
+  .cond-group-title{font-size:11px; color:var(--dim); margin:12px 0 4px;}
+  .cond-row{display:flex; align-items:center; gap:8px; padding:6px 0; font-size:13px; border-bottom:1px solid var(--line);}
+  .cond-row:last-child{border-bottom:none;}
+  .cond-row input[type=checkbox]{width:17px; height:17px; accent-color:var(--accent);}
+
+  .ind-panel{border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:12px;}
+  .ind-panel .ind-title{font-size:13px; font-weight:600; margin-bottom:8px;}
+  .ind-panel .ind-row{display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:12.5px;}
+  .ind-panel .ind-row:last-child{margin-bottom:0;}
+  .ind-panel label.lbl{width:78px; color:var(--dim); flex-shrink:0;}
+  .ind-panel select, .ind-panel input[type=number]{
+    flex:1; background:#0d1117; color:var(--text); border:1px solid var(--line);
+    border-radius:6px; padding:5px 6px; font-size:12.5px; min-width:0;}
+  .ind-panel input[type=checkbox]{width:16px; height:16px; accent-color:var(--accent); flex-shrink:0;}
 </style>
 </head>
 <body>
@@ -79,6 +94,14 @@
     <div id="add-btn" style="color:var(--accent); font-size:14px; padding:4px 8px;">添加</div>
   </div>
   <div id="add-msg" class="hint" style="display:none; padding:6px 0 0;"></div>
+
+  <div class="section-label" style="margin-top:30px;">选股</div>
+  <div class="card" style="font-size:13px;">
+    <div style="color:var(--dim); margin-bottom:10px;">目前对"自选股"池里的股票跑选股（还没做全市场扫描，等后面接入每日本地历史数据库后再加，那样效率会高很多）。每个指标的选项不设置就是不限，都设置的话是AND组合。</div>
+    <div id="cond-builder"></div>
+    <div id="run-select-btn" style="text-align:center; background:var(--accent); color:#fff; padding:9px; border-radius:8px; margin-top:6px;">运行选股</div>
+  </div>
+  <div id="select-results"></div>
 
   <div class="section-label" style="margin-top:30px;">说明</div>
   <div class="hint" style="text-align:left; padding:0 2px;">
@@ -307,6 +330,175 @@ function computeIndicatorSeries(bars){
     zq.push(model.winnerBelow(avg));
   }
   return { cost50, cost75, cost90, zq1, zq };
+}
+
+/* ---------- 选股：每个指标的参数化状态 ---------- */
+const ZQ_TREND_THRESHOLD = 5; // ZQ/ZQ1 昨日今日涨跌方向的最小差值，小于这个算"不明显"，不计入上升/下降
+
+// 5日内是否出现过某档位的陡升（按日环比 % 变化落在 [lowPct,highPct) 区间）
+function steepWithinDays(series, i, lowPct, highPct, days=5){
+  for(let k=Math.max(1,i-days+1); k<=i; k++){
+    const c0=series[k], c1=series[k-1];
+    if(c0==null||c1==null||c1<=0) continue;
+    const pct = (c0-c1)/c1*100;
+    if(pct>=lowPct && pct<highPct) return true;
+  }
+  return false;
+}
+// 某一天相对前一天的方向：'up'/'down'/'flat'（threshold=0表示只看正负，>0表示需要超过阈值才算）
+function dirAt(series, idx, threshold=0){
+  if(idx<1) return null;
+  const c0=series[idx], c1=series[idx-1];
+  if(c0==null||c1==null) return null;
+  const diff = c0-c1;
+  if(diff>threshold) return 'up';
+  if(diff<-threshold) return 'down';
+  return 'flat';
+}
+
+const STEEP_TIERS = { '3-5':[3,5], '5-8':[5,8], '8+':[8,Infinity] };
+const COST_LINES = [
+  { key:'cost50', id:'c50', label:'COST50' },
+  { key:'cost75', id:'c75', label:'COST75' },
+  { key:'cost90', id:'c90', label:'COST90' },
+];
+const ZQ_LINES = [
+  { key:'zq',  id:'zq',  label:'ZQ' },
+  { key:'zq1', id:'zq1', label:'ZQ1' },
+];
+
+function buildConditionPanel(){
+  const container = document.getElementById('cond-builder');
+  container.innerHTML = '';
+
+  COST_LINES.forEach(line=>{
+    const p = document.createElement('div');
+    p.className = 'ind-panel';
+    p.innerHTML = `
+      <div class="ind-title">${line.label}</div>
+      <div class="ind-row">
+        <input type="checkbox" id="${line.id}-steep-chk">
+        <label class="lbl" style="width:auto;">5日内曾陡升</label>
+        <select id="${line.id}-steep-level">
+          <option value="3-5">3~5%</option>
+          <option value="5-8">5~8%</option>
+          <option value="8+">8%以上</option>
+        </select>
+      </div>
+      <div class="ind-row">
+        <label class="lbl">昨日</label>
+        <select id="${line.id}-yesterday">
+          <option value="">不限</option>
+          <option value="up">上升</option>
+          <option value="down">下降</option>
+        </select>
+      </div>
+      <div class="ind-row">
+        <label class="lbl">今日</label>
+        <select id="${line.id}-today">
+          <option value="">不限</option>
+          <option value="up">上升</option>
+          <option value="down">下降</option>
+        </select>
+      </div>
+    `;
+    container.appendChild(p);
+  });
+
+  ZQ_LINES.forEach(line=>{
+    const p = document.createElement('div');
+    p.className = 'ind-panel';
+    p.innerHTML = `
+      <div class="ind-title">${line.label}</div>
+      <div class="ind-row">
+        <label class="lbl">昨日</label>
+        <select id="${line.id}-yesterday">
+          <option value="">不限</option>
+          <option value="up">上升</option>
+          <option value="down">下降</option>
+        </select>
+      </div>
+      <div class="ind-row">
+        <label class="lbl">今日</label>
+        <select id="${line.id}-today">
+          <option value="">不限</option>
+          <option value="up">上升</option>
+          <option value="down">下降</option>
+        </select>
+      </div>
+      <div class="ind-row">
+        <label class="lbl">今日值 &gt;</label>
+        <input type="number" id="${line.id}-gt" placeholder="不限">
+      </div>
+      <div class="ind-row">
+        <label class="lbl">今日值 &lt;</label>
+        <input type="number" id="${line.id}-lt" placeholder="不限">
+      </div>
+    `;
+    container.appendChild(p);
+  });
+}
+buildConditionPanel();
+
+// 从面板读取当前设置
+function readConditionSettings(){
+  const settings = { cost:{}, zq:{} };
+  COST_LINES.forEach(line=>{
+    settings.cost[line.key] = {
+      steepEnabled: document.getElementById(`${line.id}-steep-chk`).checked,
+      steepLevel: document.getElementById(`${line.id}-steep-level`).value,
+      yesterday: document.getElementById(`${line.id}-yesterday`).value,
+      today: document.getElementById(`${line.id}-today`).value,
+    };
+  });
+  ZQ_LINES.forEach(line=>{
+    const gtRaw = document.getElementById(`${line.id}-gt`).value;
+    const ltRaw = document.getElementById(`${line.id}-lt`).value;
+    settings.zq[line.key] = {
+      yesterday: document.getElementById(`${line.id}-yesterday`).value,
+      today: document.getElementById(`${line.id}-today`).value,
+      gt: gtRaw==='' ? null : +gtRaw,
+      lt: ltRaw==='' ? null : +ltRaw,
+    };
+  });
+  return settings;
+}
+
+function hasAnyActiveFilter(settings){
+  for(const line of COST_LINES){
+    const s = settings.cost[line.key];
+    if(s.steepEnabled || s.yesterday || s.today) return true;
+  }
+  for(const line of ZQ_LINES){
+    const s = settings.zq[line.key];
+    if(s.yesterday || s.today || s.gt!=null || s.lt!=null) return true;
+  }
+  return false;
+}
+
+function evalSelection(entry, settings){
+  const i = entry.bars.length-1;
+
+  for(const line of COST_LINES){
+    const s = settings.cost[line.key];
+    const series = entry[line.key];
+    if(s.steepEnabled){
+      const [lo,hi] = STEEP_TIERS[s.steepLevel];
+      if(!steepWithinDays(series, i, lo, hi)) return false;
+    }
+    if(s.yesterday && dirAt(series, i-1, 0) !== s.yesterday) return false;
+    if(s.today && dirAt(series, i, 0) !== s.today) return false;
+  }
+
+  for(const line of ZQ_LINES){
+    const s = settings.zq[line.key];
+    const series = entry[line.key];
+    if(s.yesterday && dirAt(series, i-1, ZQ_TREND_THRESHOLD) !== s.yesterday) return false;
+    if(s.today && dirAt(series, i, ZQ_TREND_THRESHOLD) !== s.today) return false;
+    if(s.gt!=null && !(series[i]!=null && series[i] > s.gt)) return false;
+    if(s.lt!=null && !(series[i]!=null && series[i] < s.lt)) return false;
+  }
+  return true;
 }
 
 /* ---------- 迷你K线绘制（canvas，不依赖第三方库） ---------- */
@@ -629,6 +821,53 @@ async function loadIntraday(){
 
 document.getElementById('back-btn').onclick = ()=>{
   document.getElementById('detail').classList.remove('open');
+};
+
+document.getElementById('run-select-btn').onclick = async ()=>{
+  const settings = readConditionSettings();
+  const resultsEl = document.getElementById('select-results');
+
+  if(!hasAnyActiveFilter(settings)){
+    resultsEl.innerHTML = `<div class="hint">至少设置一个条件（不要全部留空/不限）</div>`;
+    return;
+  }
+  const wl = loadWatchlist();
+  if(!wl.length){
+    resultsEl.innerHTML = `<div class="hint">自选股池是空的，先加几只股票再跑选股</div>`;
+    return;
+  }
+  resultsEl.innerHTML = `<div class="hint">正在计算 ${wl.length} 只自选股…</div>`;
+
+  const matched = [];
+  for(const item of wl){
+    try{
+      let entry = chipCache[item.code];
+      if(!entry){
+        const bars = await getFullHistory(item.code, 480);
+        const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
+        entry = { bars, cost50, cost75, cost90, zq1, zq };
+        chipCache[item.code] = entry;
+      }
+      if(evalSelection(entry, settings)) matched.push(item);
+    }catch(e){ /* 单只股票失败就跳过，不影响其它 */ }
+  }
+
+  if(!matched.length){
+    resultsEl.innerHTML = `<div class="hint">没有符合条件的自选股</div>`;
+    return;
+  }
+  resultsEl.innerHTML = '';
+  matched.forEach(item=>{
+    const row = document.createElement('div');
+    row.className = 'card idx-row';
+    row.style.cursor = 'pointer';
+    row.innerHTML = `
+      <div class="idx-name" style="width:auto; flex:1;"><div class="n">${item.name}</div><div class="c">${item.short}</div></div>
+      <div style="font-size:12px; color:var(--accent);">符合</div>
+    `;
+    row.onclick = ()=> openDetail(item);
+    resultsEl.appendChild(row);
+  });
 };
 
 // 详情页打开时，每 15 秒自动刷新分时（日K+副图不需要那么频繁，重开详情页时才重算）
