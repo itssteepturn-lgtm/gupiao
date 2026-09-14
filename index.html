@@ -211,17 +211,59 @@ async function getJSON(url){
   catch(e){ return await fetchJSONP(url); }
 }
 
-async function getDailyKline(secid, limit=60){
-  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
-    `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
-    `&klt=101&fqt=1&end=20500101&lmt=${limit}`;
-  const data = await getJSON(url);
-  if(!data || !data.data || !data.data.klines) throw new Error('no data');
-  // 每行: 日期,开,收,高,低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
-  return data.data.klines.map(row=>{
-    const f = row.split(',');
-    return { date:f[0], open:+f[1], close:+f[2], high:+f[3], low:+f[4], vol:+f[5] };
+// ---- 腾讯财经备用数据源（东方财富整体不可用时兜底）----
+function secidToTencent(secid){
+  const [market, code] = secid.split('.');
+  if(market==='1') return 'sh'+code;
+  if(/^(4|8)/.test(code)) return 'bj'+code;
+  return 'sz'+code;
+}
+
+async function getDailyKlineTencent(secid, limit){
+  const tcode = secidToTencent(secid);
+  const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${tcode},day,,,${limit},qfq`;
+  const res = await fetch(url, {cache:'no-store'});
+  if(!res.ok) throw new Error('tencent http '+res.status);
+  const data = await res.json();
+  const stockData = data && data.data && data.data[tcode];
+  if(!stockData) throw new Error('tencent no data');
+  const arr = stockData.qfqday || stockData.day; // 指数没有前复权字段，直接用day
+  if(!arr || !arr.length) throw new Error('tencent empty');
+  return arr.map(row=>({
+    date: row[0], open:+row[1], close:+row[2], high:+row[3], low:+row[4], vol:+row[5]
+  }));
+}
+
+async function getIntradayTencent(secid){
+  const tcode = secidToTencent(secid);
+  const url = `https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=${tcode}`;
+  const res = await fetch(url, {cache:'no-store'});
+  if(!res.ok) throw new Error('tencent http '+res.status);
+  const data = await res.json();
+  const rows = data && data.data && data.data[tcode] && data.data[tcode].data && data.data[tcode].data.data;
+  if(!rows || !rows.length) throw new Error('tencent no minute data');
+  return rows.map(line=>{
+    const parts = line.trim().split(/\s+/);
+    const hhmm = parts[0];
+    return { time: hhmm.slice(0,2)+':'+hhmm.slice(2), price:+parts[1] };
   });
+}
+
+async function getDailyKline(secid, limit=60){
+  try{
+    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
+      `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
+      `&klt=101&fqt=1&end=20500101&lmt=${limit}`;
+    const data = await getJSON(url);
+    if(!data || !data.data || !data.data.klines) throw new Error('no data');
+    // 每行: 日期,开,收,高,低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
+    return data.data.klines.map(row=>{
+      const f = row.split(',');
+      return { date:f[0], open:+f[1], close:+f[2], high:+f[3], low:+f[4], vol:+f[5] };
+    });
+  }catch(e){
+    return await getDailyKlineTencent(secid, limit); // 东方财富整体失败时兜底
+  }
 }
 
 // 带成交额、换手率的完整历史（给筹码分布/COST/WINNER用，需要较长历史才准）
@@ -241,16 +283,20 @@ async function getFullHistory(secid, limit=480){
 }
 
 async function getIntraday(secid){
-  const url = `https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}`+
-    `&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
-    `&ndays=1&iscr=0`;
-  const data = await getJSON(url);
-  if(!data || !data.data || !data.data.trends) throw new Error('no data');
-  // 每行: 时间,开,收(当前价),高,低,成交量,成交额,均价
-  return data.data.trends.map(row=>{
-    const f = row.split(',');
-    return { time:f[0].slice(11), price:+f[2], avg:+f[7] };
-  });
+  try{
+    const url = `https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}`+
+      `&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
+      `&ndays=1&iscr=0`;
+    const data = await getJSON(url);
+    if(!data || !data.data || !data.data.trends) throw new Error('no data');
+    // 每行: 时间,开,收(当前价),高,低,成交量,成交额,均价
+    return data.data.trends.map(row=>{
+      const f = row.split(',');
+      return { time:f[0].slice(11), price:+f[2], avg:+f[7] };
+    });
+  }catch(e){
+    return await getIntradayTencent(secid); // 东方财富整体失败时兜底
+  }
 }
 
 // 历史某一天的分时（1分钟K线）。用不复权价格（fqt=0）——分时看的是当天真实成交价，
@@ -991,6 +1037,7 @@ document.getElementById('back-to-live').onclick = ()=>{
 (function setupCrosshair(){
   const canvas = document.getElementById('chart-day');
   let dragging = false;
+  let fetchTimer = null;
 
   function pickBar(clientX){
     const rect = canvas.getBoundingClientRect();
@@ -1013,12 +1060,17 @@ document.getElementById('back-to-live').onclick = ()=>{
       currentIdx.type==='stock' ? entry.cost75.slice(-dayChartBars.length) : [],
       currentIdx.type==='stock' ? entry.cost90.slice(-dayChartBars.length) : [],
       selectedBarIndex);
-    loadIntraday();
+    // 只挪动十字线（本地画布重绘，不联网）；真正去查那天的分时数据要防抖，
+    // 避免拖动过程中一秒内打出十几个请求，把接口打限流导致全部数据都加载失败
+    clearTimeout(fetchTimer);
+    fetchTimer = setTimeout(loadIntraday, 400);
   }
 
   canvas.addEventListener('pointerdown', e=>{ dragging=true; onMove(e.clientX); });
   canvas.addEventListener('pointermove', e=>{ if(dragging) onMove(e.clientX); });
-  window.addEventListener('pointerup', ()=>{ dragging=false; });
+  window.addEventListener('pointerup', ()=>{
+    if(dragging){ dragging=false; clearTimeout(fetchTimer); loadIntraday(); }
+  });
 })();
 
 document.getElementById('back-btn').onclick = ()=>{
