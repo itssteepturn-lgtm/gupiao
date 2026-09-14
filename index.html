@@ -93,8 +93,22 @@
       <div class="back" id="back-btn">‹</div>
       <div class="title" id="detail-title">--</div>
     </div>
-    <div class="section-label" style="margin:4px 2px 8px;">日K</div>
-    <canvas id="chart-day" style="width:100%; height:200px; background:var(--panel); border:1px solid var(--line); border-radius:10px;"></canvas>
+    <div class="section-label" style="margin:4px 2px 8px;">日K（含COST 50/75/90成本线）</div>
+    <canvas id="chart-day" style="width:100%; height:220px; background:var(--panel); border:1px solid var(--line); border-radius:10px;"></canvas>
+    <div style="display:flex; gap:14px; font-size:11px; color:var(--dim); padding:6px 2px 0;">
+      <span><span style="color:#2ea567;">■</span> COST50</span>
+      <span><span style="color:#e0b23c;">■</span> COST75</span>
+      <span><span style="color:#e5484d;">■</span> COST90</span>
+    </div>
+
+    <div class="section-label" style="margin:20px 2px 8px;">副图（ZQ1 / ZQ 获利比例）</div>
+    <canvas id="chart-sub" style="width:100%; height:130px; background:var(--panel); border:1px solid var(--line); border-radius:10px;"></canvas>
+    <div style="display:flex; gap:14px; font-size:11px; color:var(--dim); padding:6px 2px 0;">
+      <span><span style="color:#4a90e2;">■</span> ZQ1</span>
+      <span><span style="color:#c46be0;">■</span> ZQ</span>
+      <span><span style="color:#e5484d;">■</span> 50警戒线</span>
+    </div>
+
     <div class="section-label" style="margin:20px 2px 8px;">分时</div>
     <canvas id="chart-min" style="width:100%; height:200px; background:var(--panel); border:1px solid var(--line); border-radius:10px;"></canvas>
     <div class="refresh-tag" id="detail-refresh"></div>
@@ -172,6 +186,22 @@ async function getDailyKline(secid, limit=60){
   });
 }
 
+// 带成交额、换手率的完整历史（给筹码分布/COST/WINNER用，需要较长历史才准）
+async function getFullHistory(secid, limit=480){
+  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
+    `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61`+
+    `&klt=101&fqt=1&end=20500101&lmt=${limit}`;
+  const data = await getJSON(url);
+  if(!data || !data.data || !data.data.klines) throw new Error('no data');
+  return data.data.klines.map(row=>{
+    const f = row.split(',');
+    return {
+      date:f[0], open:+f[1], close:+f[2], high:+f[3], low:+f[4],
+      vol:+f[5], amount:+f[6], turnover:+f[10] // 换手率，单位：% (如 1.23 表示 1.23%)
+    };
+  });
+}
+
 async function getIntraday(secid){
   const url = `https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}`+
     `&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
@@ -183,6 +213,100 @@ async function getIntraday(secid){
     const f = row.split(',');
     return { time:f[0].slice(11), price:+f[2], avg:+f[7] };
   });
+}
+
+/* ==========================================================================
+   筹码分布引擎（COST / WINNER 的近似复刻）
+   原理：把每天的成交量，按当天换手率做"旧筹码衰减 + 新筹码按三角分布叠加"，
+   逐日滚动累积成一张"价格 -> 持仓权重"的分布图。
+   COST(N)  = 该分布中第 N% 分位对应的价格
+   WINNER(P)= 分布中价格低于 P 的部分占总权重的比例（即"成本低于当前价"的筹码占比）
+   说明：这是社区通用的近似算法，不是通达信内部实现，数值上会接近但不保证逐位一致。
+   ========================================================================== */
+class ChipModel{
+  constructor(minPrice, maxPrice, buckets=300){
+    this.min = minPrice; this.max = maxPrice;
+    this.n = buckets;
+    this.step = (maxPrice-minPrice)/buckets || 1;
+    this.w = new Float64Array(buckets);
+  }
+  priceAt(i){ return this.min + (i+0.5)*this.step; }
+  idxOf(p){ return Math.min(this.n-1, Math.max(0, Math.floor((p-this.min)/this.step))); }
+
+  addDay(low, high, avg, turnoverPct){
+    const turnover = Math.max(0, Math.min(1, turnoverPct/100));
+    if(turnover<=0) return;
+    // 1) 旧筹码按今日换手率衰减（部分旧筹码被换手换走）
+    const decay = 1 - turnover;
+    for(let i=0;i<this.n;i++) this.w[i] *= decay;
+
+    // 2) 今日新筹码按三角分布叠加在 [low, high] 区间，峰值在 avg
+    if(high<=low){
+      this.w[this.idxOf(avg)] += turnover;
+      return;
+    }
+    const i0 = this.idxOf(low), i1 = this.idxOf(high);
+    let raw = [];
+    let sum = 0;
+    for(let i=i0;i<=i1;i++){
+      const p = this.priceAt(i);
+      let wt;
+      if(p<=avg) wt = (avg>low) ? (p-low)/(avg-low) : 1;
+      else       wt = (high>avg) ? (high-p)/(high-avg) : 1;
+      wt = Math.max(0, wt);
+      raw.push(wt); sum += wt;
+    }
+    if(sum<=0){ this.w[this.idxOf(avg)] += turnover; return; }
+    for(let i=i0;i<=i1;i++) this.w[i] += turnover * raw[i-i0] / sum;
+  }
+
+  percentile(pct){
+    const total = this.w.reduce((a,b)=>a+b,0);
+    if(total<=0) return null;
+    const target = total * pct/100;
+    let acc = 0;
+    for(let i=0;i<this.n;i++){
+      acc += this.w[i];
+      if(acc>=target) return this.priceAt(i);
+    }
+    return this.priceAt(this.n-1);
+  }
+
+  winnerBelow(price){
+    const total = this.w.reduce((a,b)=>a+b,0);
+    if(total<=0) return null;
+    const idx = this.idxOf(price);
+    let acc = 0;
+    for(let i=0;i<=idx;i++) acc += this.w[i];
+    return acc/total*100;
+  }
+}
+
+// 对一段历史逐日滚动，产出 COST50/75/90 和 ZQ1/ZQ 的时间序列（跟 bars 一一对应）
+function computeIndicatorSeries(bars){
+  const lows = bars.map(b=>b.low), highs = bars.map(b=>b.high);
+  const minP = Math.min(...lows)*0.98, maxP = Math.max(...highs)*1.02;
+  const model = new ChipModel(minP, maxP, 300);
+  const cost50=[], cost75=[], cost90=[], zq1=[], zq=[];
+
+  for(let i=0;i<bars.length;i++){
+    const b = bars[i];
+    const avg = b.vol>0 ? b.amount/(b.vol*100) : b.close; // 当日均价（VOL 单位：手）
+    model.addDay(b.low, b.high, avg, b.turnover);
+
+    cost50.push(model.percentile(50));
+    cost75.push(model.percentile(75));
+    cost90.push(model.percentile(90));
+
+    // VWMA90（公式里其实是10日量加权均价，命名沿用原公式）
+    const win = bars.slice(Math.max(0,i-9), i+1);
+    const sumVol = win.reduce((s,x)=>s+x.vol,0);
+    const vwma = sumVol>0 ? win.reduce((s,x)=>s+x.close*x.vol,0)/sumVol : b.close;
+
+    zq1.push(model.winnerBelow(vwma));
+    zq.push(model.winnerBelow(avg));
+  }
+  return { cost50, cost75, cost90, zq1, zq };
 }
 
 /* ---------- 迷你K线绘制（canvas，不依赖第三方库） ---------- */
@@ -246,6 +370,84 @@ function drawIntraday(canvas, trends, prevClose){
     if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
   });
   ctx.stroke();
+}
+
+// 日K + COST50/75/90 叠加（主图）
+function drawMainWithCost(canvas, bars, cost50, cost75, cost90){
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  if(!bars || !bars.length) return;
+
+  const allVals = [
+    ...bars.map(b=>b.high), ...bars.map(b=>b.low),
+    ...cost50.filter(v=>v!=null), ...cost75.filter(v=>v!=null), ...cost90.filter(v=>v!=null)
+  ];
+  const max = Math.max(...allVals), min = Math.min(...allVals);
+  const range = (max-min) || 1;
+  const n = bars.length;
+  const cw = w/n;
+  const y = v => h - ((v-min)/range)*h;
+
+  bars.forEach((k,i)=>{
+    const x = i*cw + cw/2;
+    const up = k.close >= k.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? '#e5484d' : '#2ea567';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x,y(k.high)); ctx.lineTo(x,y(k.low)); ctx.stroke();
+    const yO=y(k.open), yC=y(k.close);
+    const bw = Math.max(cw*0.55, 1.5);
+    ctx.fillRect(x-bw/2, Math.min(yO,yC), bw, Math.max(Math.abs(yC-yO),1));
+  });
+
+  const lineSeries = [ [cost50,'#2ea567'], [cost75,'#e0b23c'], [cost90,'#e5484d'] ];
+  lineSeries.forEach(([series,color])=>{
+    ctx.strokeStyle = color; ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    let started = false;
+    series.forEach((v,i)=>{
+      if(v==null) return;
+      const x = i*cw + cw/2;
+      if(!started){ ctx.moveTo(x,y(v)); started=true; } else ctx.lineTo(x,y(v));
+    });
+    ctx.stroke();
+  });
+}
+
+// 副图：ZQ1 / ZQ（0-100 区间）+ 50警戒线
+function drawSubChart(canvas, zq1, zq){
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  if(!zq1 || !zq1.length) return;
+
+  const n = zq1.length;
+  const y = v => h - (v/100)*h; // 固定 0-100 刻度
+
+  // UPLINE / WARNING / DOWNLINE
+  [[100,'#3a4250'],[50,'#e5484d'],[0,'#3a4250']].forEach(([v,color])=>{
+    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash(v===50?[]:[3,3]);
+    ctx.beginPath(); ctx.moveTo(0,y(v)); ctx.lineTo(w,y(v)); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  [[zq1,'#4a90e2'], [zq,'#c46be0']].forEach(([series,color])=>{
+    ctx.strokeStyle = color; ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    let started=false;
+    series.forEach((v,i)=>{
+      if(v==null) return;
+      const x = (i/(n-1))*w;
+      if(!started){ ctx.moveTo(x,y(v)); started=true; } else ctx.lineTo(x,y(v));
+    });
+    ctx.stroke();
+  });
 }
 
 /* ---------- 通用列表渲染（指数 / 自选股共用） ---------- */
@@ -367,34 +569,61 @@ document.getElementById('add-btn').onclick = async ()=>{
   }
 };
 
-/* ---------- 详情页（日K + 分时 一起显示） ---------- */
+/* ---------- 详情页（日K+COST主图 / ZQ副图 / 分时 一起显示） ---------- */
 let currentIdx = null;
+const chipCache = {}; // secid -> {bars, cost50, cost75, cost90, zq1, zq}
 
 function openDetail(idx){
   currentIdx = idx;
   document.getElementById('detail-title').textContent = idx.name;
   document.getElementById('detail').classList.add('open');
-  loadDetail();
+  loadMainAndSub();
+  loadIntraday();
 }
 
-async function loadDetail(){
-  const dayCanvas = document.getElementById('chart-day');
+async function loadMainAndSub(){
+  const secid = currentIdx.code;
+  const tag = document.getElementById('detail-refresh');
+  try{
+    let entry = chipCache[secid];
+    if(!entry){
+      tag.textContent = '正在计算筹码分布…';
+      const bars = await getFullHistory(secid, 480);
+      const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
+      entry = { bars, cost50, cost75, cost90, zq1, zq };
+      chipCache[secid] = entry;
+    }
+    // 主图只显示最近约60天，但COST/ZQ的计算用了全部历史，保证准确
+    const showN = 60;
+    const s = Math.max(0, entry.bars.length-showN);
+    drawMainWithCost(
+      document.getElementById('chart-day'),
+      entry.bars.slice(s),
+      entry.cost50.slice(s), entry.cost75.slice(s), entry.cost90.slice(s)
+    );
+    drawSubChart(
+      document.getElementById('chart-sub'),
+      entry.zq1.slice(s), entry.zq.slice(s)
+    );
+  }catch(e){
+    tag.textContent = '主图/副图加载失败';
+  }
+}
+
+async function loadIntraday(){
   const minCanvas = document.getElementById('chart-min');
   const tag = document.getElementById('detail-refresh');
   const secid = currentIdx.code;
   try{
-    const klines = cache[secid]?.klines || await getDailyKline(secid, 60);
-    drawMiniKline(dayCanvas, klines);
-
     const trends = await getIntraday(secid);
-    const prevClose = klines ? klines[klines.length-2]?.close : undefined;
+    const bars = chipCache[secid]?.bars;
+    const prevClose = bars ? bars[bars.length-2]?.close : undefined;
     drawIntraday(minCanvas, trends, prevClose);
-
     const d = new Date();
     const p = n=>String(n).padStart(2,'0');
     tag.textContent = `更新于 ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   }catch(e){
-    tag.textContent = '加载失败，下拉重试';
+    tag.textContent = '分时加载失败，下拉重试';
   }
 }
 
@@ -402,10 +631,10 @@ document.getElementById('back-btn').onclick = ()=>{
   document.getElementById('detail').classList.remove('open');
 };
 
-// 详情页打开时，每 15 秒自动刷新分时+日K
+// 详情页打开时，每 15 秒自动刷新分时（日K+副图不需要那么频繁，重开详情页时才重算）
 setInterval(()=>{
   if(document.getElementById('detail').classList.contains('open')){
-    loadDetail();
+    loadIntraday();
   }
 }, 15000);
 
