@@ -95,6 +95,7 @@
   </div>
   <div id="add-msg" class="hint" style="display:none; padding:6px 0 0;"></div>
 
+
   <div class="section-label" style="margin-top:30px;">选股</div>
   <div class="card" style="font-size:13px;">
     <div style="color:var(--dim); margin-bottom:10px;">目前对"自选股"池里的股票跑选股（还没做全市场扫描，等后面接入每日本地历史数据库后再加，那样效率会高很多）。每个指标的选项不设置就是不限，都设置的话是AND组合。</div>
@@ -271,8 +272,30 @@ async function getDailyKline(secid, limit=60){
   }
 }
 
+// ↓↓↓ 把这里改成你那个【公开数据仓库】的 用户名/仓库名，分支名一般是 main ↓↓↓
+const DATA_REPO = 'itssteepturn-lgtm/stock-data';
+const DATA_BRANCH = 'main';
+
+// 尝试读公开数据仓库里每日自动采集的数据（跨仓库，走 raw.githubusercontent.com）
+async function getLocalHistory(secid){
+  const code = secid.split('.')[1];
+  const url = `https://raw.githubusercontent.com/${DATA_REPO}/${DATA_BRANCH}/data/stocks/${code}.json`;
+  const res = await fetch(url, {cache:'no-store'});
+  if(!res.ok) throw new Error('no local data');
+  const arr = await res.json();
+  if(!Array.isArray(arr) || arr.length < 30) throw new Error('local data too short'); // 太短就还是走实时接口
+  return arr;
+}
+
 // 带成交额、换手率的完整历史（给筹码分布/COST/WINNER用，需要较长历史才准）
 async function getFullHistory(secid, limit=480){
+  try{
+    const local = await getLocalHistory(secid);
+    return local.slice(-limit);
+  }catch(e){
+    // 本地没有这只股票的数据（还没跑过每日采集，或者这只股票不在自选股代码清单里），
+    // 照旧走实时接口
+  }
   const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
     `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61`+
     `&klt=101&fqt=1&end=20500101&lmt=${limit}`;
@@ -285,6 +308,54 @@ async function getFullHistory(secid, limit=480){
       vol:+f[5], amount:+f[6], turnover:+f[10] // 换手率，单位：% (如 1.23 表示 1.23%)
     };
   });
+}
+
+// 本机本地日期（假设手机时区就是北京时间，交易时段内跟UTC不会跨日，直接用本地时间最简单可靠）
+function todayStrLocal(){
+  const d = new Date();
+  const p = n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+}
+
+// 实时行情，拼成一条"临时的今日K线"，在正式的每日采集数据还没收录今天之前，先顶上用
+async function getLiveQuoteBar(secid){
+  const url = `https://push2.eastmoney.com/api/qt/stock/get?secid=${secid}`+
+    `&fltt=2&invt=2&fields=f43,f44,f45,f46,f47,f48,f8`;
+  const data = await getJSON(url);
+  if(!data || !data.data) throw new Error('no live quote');
+  const d = data.data;
+  if(d.f43==null || d.f43==='-') throw new Error('停牌或无效行情');
+  return {
+    date: todayStrLocal(),
+    open:+d.f46, close:+d.f43, high:+d.f44, low:+d.f45,
+    vol:+d.f47, amount:+d.f48, turnover:+d.f8
+  };
+}
+
+const histCache = {}; // secid -> 已收盘的历史（不含今天），减少重复抓取
+
+async function getHistBars(secid, limit){
+  if(histCache[secid] && histCache[secid].length >= Math.min(limit, 2000)) return histCache[secid];
+  const bars = await getFullHistory(secid, limit);
+  histCache[secid] = bars;
+  return bars;
+}
+
+// 组一份完整的"计算用"数据：历史收盘数据 + （如果今天还没被正式采集）临时拼一条今天的实时数据
+async function buildStockEntry(secid, limit){
+  const histBars = await getHistBars(secid, limit);
+  let bars = histBars;
+  const today = todayStrLocal();
+  if(!bars.length || bars[bars.length-1].date !== today){
+    try{
+      const liveBar = await getLiveQuoteBar(secid);
+      if(liveBar.date === today) bars = bars.concat([liveBar]);
+    }catch(e){
+      // 拿不到实时行情（比如停牌），就只用已收盘的历史，不强求
+    }
+  }
+  const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
+  return { bars, cost50, cost75, cost90, zq1, zq };
 }
 
 async function getIntraday(secid){
@@ -675,6 +746,18 @@ function limitPctForStock(code, name){
   return 10;
 }
 
+// 把"09:31:00"这种时间字符串映射到全天交易时段(9:30-11:30, 13:00-15:00共240分钟)的横轴比例，
+// 保证盘中看的时候，已经过去的时间在正确的位置，还没到的时间留白，而不是把现有的点硬拉满整个宽度
+function timeFraction(hhmmss){
+  const parts = hhmmss.split(':');
+  const mins = (+parts[0])*60 + (+parts[1]);
+  const mStart=9*60+30, mEnd=11*60+30, aStart=13*60, aEnd=15*60;
+  let frac;
+  if(mins<=mEnd) frac = Math.max(0, mins-mStart)/240;
+  else frac = (120 + Math.max(0, Math.min(mins,aEnd)-aStart))/240;
+  return Math.max(0, Math.min(1, frac));
+}
+
 function drawIntraday(canvas, trends, prevClose, limitPct){
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -695,22 +778,25 @@ function drawIntraday(canvas, trends, prevClose, limitPct){
     max = base+maxDev; min = base-maxDev;
   }
   const range = (max-min) || 1;
-  const n = prices.length;
   const y = v => h - ((v-min)/range)*h;
+  const x = t => timeFraction(t.time)*w;
 
   // 基准线（平盘线）
   ctx.strokeStyle = '#3a4250'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
   ctx.beginPath(); ctx.moveTo(0,y(base)); ctx.lineTo(w,y(base)); ctx.stroke();
   ctx.setLineDash([]);
+  // 午间休市分割线（11:30-13:00 压缩成一条竖线，跟真实交易软件一致）
+  const midX = 0.5*w;
+  ctx.strokeStyle = '#232b36'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(midX,0); ctx.lineTo(midX,h); ctx.stroke();
 
   const lastPrice = prices[prices.length-1];
   const lineColor = lastPrice>=base ? '#e5484d' : '#2ea567';
   ctx.strokeStyle = lineColor; ctx.lineWidth = 1.5;
   ctx.beginPath();
-  prices.forEach((p,i)=>{
-    const x = (i/(n-1))*w;
-    const yy = y(p);
-    if(i===0) ctx.moveTo(x,yy); else ctx.lineTo(x,yy);
+  trends.forEach((t,i)=>{
+    const xx = x(t), yy = y(t.price);
+    if(i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);
   });
   ctx.stroke();
 
@@ -984,14 +1070,9 @@ async function loadMainAndSub(){
   const dayCanvas = document.getElementById('chart-day');
   try{
     if(currentIdx.type==='stock'){
-      let entry = chipCache[secid];
-      if(!entry){
-        tag.textContent = '正在计算筹码分布…';
-        const bars = await getFullHistory(secid, 480);
-        const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
-        entry = { bars, cost50, cost75, cost90, zq1, zq };
-        chipCache[secid] = entry;
-      }
+      tag.textContent = '正在计算筹码分布…';
+      const entry = await buildStockEntry(secid, 480);
+      chipCache[secid] = entry;
       // 主图只显示最近约60天，但COST/ZQ的计算用了全部历史，保证准确
       const showN = 60;
       const s = Math.max(0, entry.bars.length-showN);
@@ -1022,7 +1103,7 @@ async function loadIntraday(){
   try{
     if(isLiveDay){
       const trends = await getIntraday(secid);
-      const prevClose = bars.length>1 ? bars[bars.length-2].close : undefined;
+      const prevClose = bars.length>0 ? bars[bars.length-1].close : undefined;
       drawIntraday(minCanvas, trends, prevClose, limitPct);
       document.getElementById('intraday-date-tag').textContent = '';
       document.getElementById('back-to-live').style.display = 'none';
@@ -1119,13 +1200,8 @@ document.getElementById('run-select-btn').onclick = async ()=>{
   const matched = [];
   for(const item of wl){
     try{
-      let entry = chipCache[item.code];
-      if(!entry || entry.bars.length < neededLimit && entry.bars.length < 2000){
-        const bars = await getFullHistory(item.code, neededLimit);
-        const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
-        entry = { bars, cost50, cost75, cost90, zq1, zq };
-        chipCache[item.code] = entry;
-      }
+      const entry = await buildStockEntry(item.code, neededLimit);
+      chipCache[item.code] = entry;
       if(fromDate || toDate){
         const hits = scanDateRange(entry, settings, fromDate, toDate);
         if(hits.length) matched.push({ item, dates: hits });
@@ -1183,10 +1259,9 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
     try{
       let entry = chipCache[item.code];
       if(!entry || (entry.bars.length < neededLimit && entry.bars.length < 2000)){
-        const bars = await getFullHistory(item.code, neededLimit);
+        const bars = await getHistBars(item.code, neededLimit);
         const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
         entry = { bars, cost50, cost75, cost90, zq1, zq };
-        chipCache[item.code] = entry;
       }
       const trades = backtestEntry(entry, settings, fromDate, toDate);
       if(trades.length){
