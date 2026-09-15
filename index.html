@@ -79,6 +79,7 @@
     <h1>盘面</h1>
     <div id="clock">--:--:--</div>
   </header>
+  <div id="data-status" style="font-size:11px; color:var(--dim); margin:-10px 2px 14px;">数据状态：检查中…</div>
 
   <div class="section-label">指数</div>
   <div id="idx-list"></div>
@@ -138,6 +139,7 @@
       <span><span style="color:#e0b23c;">■</span> COST75</span>
       <span><span style="color:#e5484d;">■</span> COST90</span>
     </div>
+    <div id="today-source-tag" style="font-size:11px; color:var(--dim); padding:4px 2px 0;"></div>
 
     <div class="section-label" style="margin:20px 2px 8px; display:flex; justify-content:space-between; align-items:center;">
       <span>分时 <span id="intraday-date-tag" style="color:var(--dim); font-weight:normal;"></span></span>
@@ -346,16 +348,25 @@ async function buildStockEntry(secid, limit){
   const histBars = await getHistBars(secid, limit);
   let bars = histBars;
   const today = todayStrLocal();
+  let liveOverlay = false;
   if(!bars.length || bars[bars.length-1].date !== today){
     try{
       const liveBar = await getLiveQuoteBar(secid);
-      if(liveBar.date === today) bars = bars.concat([liveBar]);
+      if(liveBar.date === today){ bars = bars.concat([liveBar]); liveOverlay = true; }
     }catch(e){
       // 拿不到实时行情（比如停牌），就只用已收盘的历史，不强求
     }
   }
   const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
-  return { bars, cost50, cost75, cost90, zq1, zq };
+  return { bars, cost50, cost75, cost90, zq1, zq, liveOverlay };
+}
+
+// 从接口返回的原始时间字符串里稳妥地抠出"HH:MM"，不依赖具体是几位日期前缀
+// （之前写死 slice(11) 是猜的格式，猜错了整根分时线的横坐标就全错）
+function extractHHMM(raw){
+  const m = raw.match(/(\d{1,2}):(\d{2})/);
+  if(!m) return null;
+  return `${m[1].padStart(2,'0')}:${m[2]}`;
 }
 
 async function getIntraday(secid){
@@ -368,8 +379,8 @@ async function getIntraday(secid){
     // 每行: 时间,开,收(当前价),高,低,成交量,成交额,均价
     return data.data.trends.map(row=>{
       const f = row.split(',');
-      return { time:f[0].slice(11), price:+f[2], avg:+f[7] };
-    });
+      return { time:extractHHMM(f[0]), price:+f[2], avg:+f[7] };
+    }).filter(t=>t.time);
   }catch(e){
     return await getIntradayTencent(secid); // 东方财富整体失败时兜底
   }
@@ -389,8 +400,8 @@ async function getHistoricalIntraday(secid, dateStr){
   }
   return data.data.klines.map(row=>{
     const f = row.split(',');
-    return { time:f[0].slice(11), price:+f[2] };
-  });
+    return { time:extractHHMM(f[0]), price:+f[2] };
+  }).filter(t=>t.time);
 }
 
 // 不复权的前一交易日收盘价——涨跌停边界必须按真实价格算，不能用复权后的日K收盘价
@@ -1067,12 +1078,18 @@ function updateAddWatchBtn(){
 async function loadMainAndSub(){
   const secid = currentIdx.code;
   const tag = document.getElementById('detail-refresh');
+  const sourceTag = document.getElementById('today-source-tag');
   const dayCanvas = document.getElementById('chart-day');
+  sourceTag.textContent = '';
   try{
     if(currentIdx.type==='stock'){
       tag.textContent = '正在计算筹码分布…';
       const entry = await buildStockEntry(secid, 480);
       chipCache[secid] = entry;
+      const lastDate = entry.bars.length ? entry.bars[entry.bars.length-1].date : null;
+      sourceTag.textContent = entry.liveOverlay
+        ? `今日(${lastDate})：临时实时数据，收盘后会自动换成官方数据`
+        : (lastDate===todayStrLocal() ? `今日(${lastDate})：官方数据已更新` : `最新数据：${lastDate}`);
       // 主图只显示最近约60天，但COST/ZQ的计算用了全部历史，保证准确
       const showN = 60;
       const s = Math.max(0, entry.bars.length-showN);
@@ -1325,6 +1342,22 @@ setInterval(()=>{
 /* ---------- 启动 ---------- */
 renderIndexList();
 renderWatchlist();
+checkDataStatus();
+
+async function checkDataStatus(){
+  const el = document.getElementById('data-status');
+  try{
+    const url = `https://raw.githubusercontent.com/${DATA_REPO}/${DATA_BRANCH}/data/meta.json`;
+    const res = await fetch(url, {cache:'no-store'});
+    if(!res.ok) throw new Error('no meta');
+    const meta = await res.json();
+    const today = todayStrLocal();
+    const isToday = meta.lastUpdateDate === today;
+    el.textContent = `全市场数据更新至 ${meta.lastUpdateDate}（共${meta.updated}只${meta.failed?`，失败${meta.failed}只`:''}）${isToday?'':' · 今天的数据靠实时行情临时补'}`;
+  }catch(e){
+    el.textContent = '数据状态：还没读到全市场采集记录（可能还没跑过，或者跑的时候失败了）';
+  }
+}
 
 // 自选股在主列表可见时，每 20 秒刷新一次价格（分时详情页有自己的15秒刷新，互不影响）
 setInterval(()=>{
