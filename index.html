@@ -106,9 +106,14 @@
     </div>
     <div style="color:var(--dim); font-size:11px; margin:-6px 0 12px;">不填就只看最新一天；填了会把范围内每一天都跑一遍，列出命中的日期</div>
     <div id="cond-builder"></div>
-    <div id="run-select-btn" style="text-align:center; background:var(--accent); color:#fff; padding:9px; border-radius:8px; margin-top:6px;">运行选股</div>
+    <div style="display:flex; gap:8px; margin-top:6px;">
+      <div id="run-select-btn" style="flex:1; text-align:center; background:var(--accent); color:#fff; padding:9px; border-radius:8px;">运行选股</div>
+      <div id="run-backtest-btn" style="flex:1; text-align:center; background:#2ea567; color:#fff; padding:9px; border-radius:8px;">运行回测</div>
+    </div>
+    <div style="color:var(--dim); font-size:11px; margin-top:6px;">回测＝命中当天收盘价买入，下一交易日收盘价卖出，统计范围内所有触发次数的胜率和平均涨幅</div>
   </div>
   <div id="select-results"></div>
+  <div id="backtest-results"></div>
 
   <div class="section-label" style="margin-top:30px;">说明</div>
   <div class="hint" style="text-align:left; padding:0 2px;">
@@ -606,6 +611,22 @@ function scanDateRange(entry, settings, fromDate, toDate){
     if(evalSelectionAt(entry, settings, i)) hits.push(d);
   }
   return hits;
+}
+
+// 回测：范围内每次命中条件，收盘价买入，下一交易日收盘价卖出
+function backtestEntry(entry, settings, fromDate, toDate){
+  const trades = [];
+  for(let i=0;i<entry.bars.length-1;i++){ // -1：要有下一天数据才能算卖出
+    const d = entry.bars[i].date;
+    if(fromDate && d<fromDate) continue;
+    if(toDate && d>toDate) continue;
+    if(evalSelectionAt(entry, settings, i)){
+      const buy = entry.bars[i].close;
+      const sell = entry.bars[i+1].close;
+      trades.push({ date:d, ret:(sell-buy)/buy*100 });
+    }
+  }
+  return trades;
 }
 
 // 估算覆盖某个起始日期需要抓多少天的历史（交易日约为日历日的 5/7，留一些余量）
@@ -1131,6 +1152,88 @@ document.getElementById('run-select-btn').onclick = async ()=>{
         <div style="font-size:12px; color:var(--accent);">符合</div>
       </div>
       <div>${dateTags}${more}</div>
+    `;
+    row.onclick = ()=> openDetail(item);
+    resultsEl.appendChild(row);
+  });
+};
+
+document.getElementById('run-backtest-btn').onclick = async ()=>{
+  const settings = readConditionSettings();
+  const resultsEl = document.getElementById('backtest-results');
+  const fromDate = document.getElementById('sel-date-from').value || null;
+  const toDate = document.getElementById('sel-date-to').value || null;
+
+  if(!hasAnyActiveFilter(settings)){
+    resultsEl.innerHTML = `<div class="hint">至少设置一个条件（不要全部留空/不限）</div>`;
+    return;
+  }
+  const wl = loadWatchlist();
+  if(!wl.length){
+    resultsEl.innerHTML = `<div class="hint">自选股池是空的，先加几只股票再回测</div>`;
+    return;
+  }
+  resultsEl.innerHTML = `<div class="hint">正在回测 ${wl.length} 只自选股…</div>`;
+
+  // 没填起始日期时，回测尽量拉长一些历史，样本才有意义
+  const neededLimit = fromDate ? estimateNeededBars(fromDate) : 700;
+  const perStock = [];
+  let allTrades = [];
+  for(const item of wl){
+    try{
+      let entry = chipCache[item.code];
+      if(!entry || (entry.bars.length < neededLimit && entry.bars.length < 2000)){
+        const bars = await getFullHistory(item.code, neededLimit);
+        const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
+        entry = { bars, cost50, cost75, cost90, zq1, zq };
+        chipCache[item.code] = entry;
+      }
+      const trades = backtestEntry(entry, settings, fromDate, toDate);
+      if(trades.length){
+        perStock.push({ item, trades });
+        allTrades = allTrades.concat(trades);
+      }
+    }catch(e){ /* 单只股票失败就跳过 */ }
+  }
+
+  if(!allTrades.length){
+    resultsEl.innerHTML = `<div class="hint">这套条件在自选股的历史里没有触发过（或者历史数据不够长）</div>`;
+    return;
+  }
+
+  function summarize(trades){
+    const n = trades.length;
+    const winCount = trades.filter(t=>t.ret>0).length;
+    const avgRet = trades.reduce((s,t)=>s+t.ret,0)/n;
+    return { n, winRate: winCount/n*100, avgRet };
+  }
+
+  const overall = summarize(allTrades);
+  resultsEl.innerHTML = '';
+  const summaryCard = document.createElement('div');
+  summaryCard.className = 'card';
+  summaryCard.innerHTML = `
+    <div style="font-size:13px; font-weight:600; margin-bottom:8px;">回测汇总（自选股整体，共${overall.n}次触发）</div>
+    <div style="display:flex; gap:16px; font-size:13px;">
+      <div><div style="color:var(--dim); font-size:11px;">胜率</div><div class="${overall.winRate>=50?'up':'down'}">${overall.winRate.toFixed(1)}%</div></div>
+      <div><div style="color:var(--dim); font-size:11px;">平均涨幅</div><div class="${overall.avgRet>=0?'up':'down'}">${overall.avgRet>=0?'+':''}${overall.avgRet.toFixed(2)}%</div></div>
+    </div>
+  `;
+  resultsEl.appendChild(summaryCard);
+
+  perStock.forEach(({item, trades})=>{
+    const s = summarize(trades);
+    const row = document.createElement('div');
+    row.className = 'card';
+    row.style.cursor = 'pointer';
+    row.innerHTML = `
+      <div class="idx-row">
+        <div class="idx-name" style="width:auto; flex:1;"><div class="n">${item.name}</div><div class="c">${item.short}</div></div>
+        <div style="text-align:right;">
+          <div style="font-size:13px;" class="${s.winRate>=50?'up':'down'}">胜率${s.winRate.toFixed(0)}%</div>
+          <div style="font-size:11px; color:var(--dim);">${s.n}次 均${s.avgRet>=0?'+':''}${s.avgRet.toFixed(2)}%</div>
+        </div>
+      </div>
     `;
     row.onclick = ()=> openDetail(item);
     resultsEl.appendChild(row);
