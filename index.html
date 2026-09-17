@@ -875,8 +875,10 @@ function drawMainWithCost(canvas, bars, cost50, cost75, cost90, highlightIndex){
     ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke();
     ctx.setLineDash([]);
     const b = bars[highlightIndex];
+    const prev = bars[highlightIndex-1];
+    const pctStr = prev ? `${((b.close-prev.close)/prev.close*100>=0?'+':'')}${((b.close-prev.close)/prev.close*100).toFixed(2)}%` : '--';
+    const label = `${b.date}  开:${b.open.toFixed(2)} 收:${b.close.toFixed(2)} ${pctStr}`;
     ctx.font = '10px -apple-system,sans-serif'; ctx.fillStyle = '#e6e9ef'; ctx.textBaseline = 'top';
-    const label = `${b.date} 收:${b.close.toFixed(2)}`;
     const tw = ctx.measureText(label).width;
     const tx = Math.min(Math.max(x-tw/2, 2), w-tw-2);
     ctx.fillText(label, tx, 2);
@@ -1112,15 +1114,19 @@ async function loadIntraday(){
   const minCanvas = document.getElementById('chart-min');
   const tag = document.getElementById('detail-refresh');
   const secid = currentIdx.code;
-  const bars = chipCache[secid]?.bars || dayChartBars;
-  const lastBar = bars[bars.length-1];
+  const lastBar = dayChartBars[dayChartBars.length-1];
   const isLiveDay = selectedBarIndex==null || (dayChartBars[selectedBarIndex] && dayChartBars[selectedBarIndex].date===lastBar?.date);
   const limitPct = currentIdx.type==='stock' ? limitPctForStock(currentIdx.short, currentIdx.name) : null;
 
   try{
     if(isLiveDay){
       const trends = await getIntraday(secid);
-      const prevClose = bars.length>0 ? bars[bars.length-1].close : undefined;
+      // "昨收"基准价必须来自纯历史（已收盘）数据，不能用可能带着"今天临时行情"的缓存——
+      // 不然基准价会不断被当前价自己污染，涨跌幅永远趋近于0%，坐标轴也会跟着全错
+      const histBars = currentIdx.type==='stock'
+        ? await getHistBars(secid, 480)
+        : (chipCache[secid]?.bars || await getDailyKline(secid, 60));
+      const prevClose = histBars.length>0 ? histBars[histBars.length-1].close : undefined;
       drawIntraday(minCanvas, trends, prevClose, limitPct);
       document.getElementById('intraday-date-tag').textContent = '';
       document.getElementById('back-to-live').style.display = 'none';
