@@ -81,7 +81,7 @@
   </header>
   <div id="data-status" style="font-size:11px; color:var(--dim); margin:-10px 2px 14px; display:flex; justify-content:space-between; align-items:center;">
     <span id="data-status-text">数据状态：检查中…</span>
-    <span id="data-status-refresh" style="color:var(--accent); cursor:pointer;">刷新</span>
+    <span id="data-status-refresh" style="color:var(--accent); cursor:pointer;">立即更新</span>
   </div>
 
   <div class="section-label">指数</div>
@@ -102,7 +102,12 @@
 
   <div class="section-label" style="margin-top:30px;">选股</div>
   <div class="card" style="font-size:13px;">
-    <div style="color:var(--dim); margin-bottom:10px;">目前对"自选股"池里的股票跑选股（还没做全市场扫描，等后面接入每日本地历史数据库后再加，那样效率会高很多）。每个指标的选项不设置就是不限，都设置的话是AND组合。</div>
+    <div style="color:var(--dim); margin-bottom:10px;">每个指标的选项不设置就是不限，都设置的话是AND组合。</div>
+    <div style="display:flex; align-items:center; gap:14px; margin-bottom:12px; font-size:12.5px;">
+      <span style="color:var(--dim);">板块</span>
+      <label><input type="checkbox" id="board-sh" checked> 上证</label>
+      <label><input type="checkbox" id="board-sz" checked> 深证</label>
+    </div>
     <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
       <span style="width:60px; color:var(--dim); font-size:12.5px;">日期</span>
       <input id="sel-date-from" type="date" style="flex:1; background:#0d1117; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 6px; font-size:12.5px;">
@@ -114,17 +119,12 @@
     <div style="display:flex; gap:8px; margin-top:6px;">
       <div id="run-select-btn" style="flex:1; text-align:center; background:var(--accent); color:#fff; padding:9px; border-radius:8px;">运行选股</div>
       <div id="run-backtest-btn" style="flex:1; text-align:center; background:#2ea567; color:#fff; padding:9px; border-radius:8px;">运行回测</div>
+      <div id="stop-scan-btn" style="display:none; background:#e5484d; color:#fff; padding:9px 14px; border-radius:8px;">停止</div>
     </div>
     <div style="color:var(--dim); font-size:11px; margin-top:6px;">回测＝命中当天收盘价买入，下一交易日收盘价卖出，统计范围内所有触发次数的胜率和平均涨幅</div>
   </div>
   <div id="select-results"></div>
   <div id="backtest-results"></div>
-
-  <div class="section-label" style="margin-top:30px;">说明</div>
-  <div class="hint" style="text-align:left; padding:0 2px;">
-    这是第一阶段原型：指数日K缩略图 + 点进去看分时。数据来自公开行情接口，本页面在你自己的浏览器里直接请求，不经过任何服务器中转。<br><br>
-    如果某条指数显示"加载失败"，多半是行情接口临时抽风或者网络问题，过几秒下拉刷新即可，不代表页面坏了。
-  </div>
 </div>
 
 <div id="detail">
@@ -379,20 +379,21 @@ async function getFullMarketList(){
 }
 
 // 并发跑一批异步任务，限制同时进行的数量，避免几千个请求一次性打出去
+let scanCancelled = false;
 async function poolRun(items, worker, concurrency, onProgress){
   const results = new Array(items.length);
   let i = 0, done = 0;
   async function run(){
-    while(i < items.length){
+    while(i < items.length && !scanCancelled){
       const idx = i++;
       try{ results[idx] = await worker(items[idx]); }
       catch(e){ results[idx] = null; }
       done++;
-      if(onProgress && done % 50 === 0) onProgress(done, items.length);
+      if(onProgress && done % 20 === 0) onProgress(done, items.length);
     }
   }
   await Promise.all(Array.from({length:concurrency}, run));
-  if(onProgress) onProgress(items.length, items.length);
+  if(onProgress) onProgress(done, items.length);
   return results;
 }
 
@@ -444,17 +445,16 @@ async function getPrevCloseUnadjusted(secid, dateStr){
   const ymd = dateStr.replace(/-/g,'');
   const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
     `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
-    `&klt=101&fqt=0&end=${ymd}&lmt=2`;
+    `&klt=101&fqt=0&end=${ymd}&lmt=5`;
   const data = await getJSON(url);
-  if(!data || !data.data || !data.data.klines || data.data.klines.length<2){
+  if(!data || !data.data || !data.data.klines){
     throw new Error('拿不到前收盘价');
   }
   const rows = data.data.klines.map(r=>r.split(','));
-  // lmt=2 且 end=选中日：返回 [选中日前一天, 选中日]（如果选中日当天就是end，通常在最后一行）
-  const selectedRow = rows[rows.length-1];
-  const prevRow = rows[rows.length-2];
-  // 保险起见：如果最后一行日期不是选中日，说明选中日不是交易日，直接用最后一行当"前收盘"
-  return selectedRow[0]===ymd || selectedRow[0]===dateStr ? +prevRow[2] : +selectedRow[2];
+  const idx = rows.findIndex(r=>r[0]===dateStr || r[0]===ymd);
+  if(idx>0) return +rows[idx-1][2];
+  if(rows.length>=2) return +rows[rows.length-2][2]; // 精确匹配不到，保守退化处理
+  throw new Error('拿不到前收盘价');
 }
 
 /* ==========================================================================
@@ -1240,11 +1240,32 @@ document.getElementById('back-btn').onclick = ()=>{
   document.getElementById('detail').classList.remove('open');
 };
 
+function renderMatchRow(container, item, dates){
+  const row = document.createElement('div');
+  row.className = 'card';
+  row.style.cursor = 'pointer';
+  const dateTags = dates.slice(0,8).map(d=>`<span style="display:inline-block; background:#0d1117; border:1px solid var(--line); border-radius:4px; padding:2px 6px; margin:2px 4px 0 0; font-size:11px; color:var(--dim);">${d}</span>`).join('');
+  const more = dates.length>8 ? `<span style="color:var(--dim); font-size:11px;">等共${dates.length}天</span>` : '';
+  row.innerHTML = `
+    <div class="idx-row" style="margin-bottom:${dates.length?'6px':'0'};">
+      <div class="idx-name" style="width:auto; flex:1;"><div class="n">${item.name}</div><div class="c">${item.short}</div></div>
+      <div style="font-size:12px; color:var(--accent);">符合</div>
+    </div>
+    <div>${dateTags}${more}</div>
+  `;
+  row.onclick = ()=> openDetail(item);
+  container.appendChild(row);
+}
+
+document.getElementById('stop-scan-btn').onclick = ()=>{ scanCancelled = true; };
+
 document.getElementById('run-select-btn').onclick = async ()=>{
   const settings = readConditionSettings();
   const resultsEl = document.getElementById('select-results');
   const fromDate = document.getElementById('sel-date-from').value || null;
   const toDate = document.getElementById('sel-date-to').value || null;
+  const wantSh = document.getElementById('board-sh').checked;
+  const wantSz = document.getElementById('board-sz').checked;
 
   if(!hasAnyActiveFilter(settings)){
     resultsEl.innerHTML = `<div class="hint">至少设置一个条件（不要全部留空/不限）</div>`;
@@ -1254,46 +1275,45 @@ document.getElementById('run-select-btn').onclick = async ()=>{
   let list;
   try{ list = await getFullMarketList(); }
   catch(e){ resultsEl.innerHTML = `<div class="hint">${e.message}</div>`; return; }
+  list = list.filter(x => (wantSh && x.code.startsWith('1.')) || (wantSz && x.code.startsWith('0.')));
 
+  scanCancelled = false;
+  document.getElementById('stop-scan-btn').style.display = 'block';
   resultsEl.innerHTML = `<div class="hint" id="scan-progress">正在扫描 0/${list.length}…</div>`;
+  const matchCountEl = document.createElement('div');
+  resultsEl.appendChild(matchCountEl);
   const neededLimit = estimateNeededBars(fromDate);
-  const matched = [];
+  let matchCount = 0;
+  const MAX_SEL_ROWS = 150;
 
   await poolRun(list, async (item)=>{
     const entry = await buildStockEntry(item.code, neededLimit);
+    let dates = null;
     if(fromDate || toDate){
       const hits = scanDateRange(entry, settings, fromDate, toDate);
-      if(hits.length) matched.push({ item, dates: hits });
+      if(hits.length) dates = hits;
     }else{
-      if(evalSelectionAt(entry, settings, entry.bars.length-1)) matched.push({ item, dates:[entry.bars[entry.bars.length-1].date] });
+      if(evalSelectionAt(entry, settings, entry.bars.length-1)) dates = [entry.bars[entry.bars.length-1].date];
     }
-  }, 15, (done,total)=>{
+    if(dates){
+      matchCount++;
+      if(matchCount <= MAX_SEL_ROWS) renderMatchRow(matchCountEl, item, dates);
+    }
+  }, 30, (done,total)=>{
     const p = document.getElementById('scan-progress');
-    if(p) p.textContent = `正在扫描 ${done}/${total}…（已找到${matched.length}只符合）`;
+    if(p) p.textContent = `${scanCancelled?'已停止':'正在扫描'} ${done}/${total}…（已找到${matchCount}只符合）`;
   });
 
-  if(!matched.length){
-    resultsEl.innerHTML = `<div class="hint">扫描完成，没有符合条件的股票</div>`;
-    return;
+  document.getElementById('stop-scan-btn').style.display = 'none';
+  if(matchCount > MAX_SEL_ROWS){
+    const more = document.createElement('div');
+    more.className = 'hint';
+    more.textContent = `还有${matchCount-MAX_SEL_ROWS}只没显示，条件收紧一些结果会更聚焦`;
+    resultsEl.appendChild(more);
   }
-  resultsEl.innerHTML = `<div class="hint">扫描完成，共${matched.length}只符合</div>`;
-  const MAX_SEL_ROWS = 150;
-  matched.slice(0, MAX_SEL_ROWS).forEach(({item, dates})=>{
-    const row = document.createElement('div');
-    row.className = 'card';
-    row.style.cursor = 'pointer';
-    const dateTags = dates.slice(0,8).map(d=>`<span style="display:inline-block; background:#0d1117; border:1px solid var(--line); border-radius:4px; padding:2px 6px; margin:2px 4px 0 0; font-size:11px; color:var(--dim);">${d}</span>`).join('');
-    const more = dates.length>8 ? `<span style="color:var(--dim); font-size:11px;">等共${dates.length}天</span>` : '';
-    row.innerHTML = `
-      <div class="idx-row" style="margin-bottom:${dates.length?'6px':'0'};">
-        <div class="idx-name" style="width:auto; flex:1;"><div class="n">${item.name}</div><div class="c">${item.short}</div></div>
-        <div style="font-size:12px; color:var(--accent);">符合</div>
-      </div>
-      <div>${dateTags}${more}</div>
-    `;
-    row.onclick = ()=> openDetail(item);
-    resultsEl.appendChild(row);
-  });
+  if(matchCount===0){
+    resultsEl.innerHTML = `<div class="hint">扫描完成，没有符合条件的股票</div>`;
+  }
 };
 
 document.getElementById('run-backtest-btn').onclick = async ()=>{
@@ -1301,6 +1321,8 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
   const resultsEl = document.getElementById('backtest-results');
   const fromDate = document.getElementById('sel-date-from').value || null;
   const toDate = document.getElementById('sel-date-to').value || null;
+  const wantSh = document.getElementById('board-sh').checked;
+  const wantSz = document.getElementById('board-sz').checked;
 
   if(!hasAnyActiveFilter(settings)){
     resultsEl.innerHTML = `<div class="hint">至少设置一个条件（不要全部留空/不限）</div>`;
@@ -1310,7 +1332,10 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
   let list;
   try{ list = await getFullMarketList(); }
   catch(e){ resultsEl.innerHTML = `<div class="hint">${e.message}</div>`; return; }
+  list = list.filter(x => (wantSh && x.code.startsWith('1.')) || (wantSz && x.code.startsWith('0.')));
 
+  scanCancelled = false;
+  document.getElementById('stop-scan-btn').style.display = 'block';
   resultsEl.innerHTML = `<div class="hint" id="bt-progress">正在回测 0/${list.length}…</div>`;
   // 没填起始日期时，回测尽量拉长一些历史，样本才有意义
   const neededLimit = fromDate ? estimateNeededBars(fromDate) : 700;
@@ -1326,10 +1351,11 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
       perStock.push({ item, trades });
       allTrades = allTrades.concat(trades);
     }
-  }, 15, (done,total)=>{
+  }, 30, (done,total)=>{
     const p = document.getElementById('bt-progress');
-    if(p) p.textContent = `正在回测 ${done}/${total}…（已找到${allTrades.length}次触发）`;
+    if(p) p.textContent = `${scanCancelled?'已停止':'正在回测'} ${done}/${total}…（已找到${allTrades.length}次触发）`;
   });
+  document.getElementById('stop-scan-btn').style.display = 'none';
 
   if(!allTrades.length){
     resultsEl.innerHTML = `<div class="hint">这套条件在全市场历史里没有触发过（或者历史数据不够长）</div>`;
@@ -1406,12 +1432,15 @@ async function checkDataStatus(){
     const isToday = meta.lastUpdateDate === today;
     const ranAt = meta.ranAt ? new Date(meta.ranAt) : null;
     const timeStr = ranAt ? `${ranAt.getMonth()+1}/${ranAt.getDate()} ${String(ranAt.getHours()).padStart(2,'0')}:${String(ranAt.getMinutes()).padStart(2,'0')}` : '--';
-    el.textContent = `数据${meta.lastUpdateDate}｜${timeStr}跑的｜清单${meta.total}只，更新${meta.updated}只${meta.failed?`，失败${meta.failed}只`:''}${meta.note?` · ${meta.note}`:''}${isToday?'':' · 今天靠实时行情临时补'}`;
+    el.textContent = `${timeStr}更新｜清单${meta.total}只，已更新${meta.updated}只${meta.note?` · ${meta.note}`:''}${isToday?'':' · 今天靠实时行情临时补'}`;
   }catch(e){
     el.textContent = '数据状态：还没读到全市场采集记录（可能还没跑过，或者跑的时候失败了）';
   }
 }
-document.getElementById('data-status-refresh').onclick = checkDataStatus;
+document.getElementById('data-status-refresh').onclick = ()=>{
+  window.open(`https://github.com/${DATA_REPO}/actions/workflows/daily-data.yml`, '_blank');
+};
+setInterval(checkDataStatus, 60000);
 
 // 自选股在主列表可见时，每 20 秒刷新一次价格（分时详情页有自己的15秒刷新，互不影响）
 setInterval(()=>{
