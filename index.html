@@ -364,6 +364,38 @@ async function buildStockEntry(secid, limit){
   return { bars, cost50, cost75, cost90, zq1, zq, liveOverlay };
 }
 
+// 全市场代码+名称清单（每日采集脚本写的），选股/回测现在用这个，不再局限于自选股
+let fullMarketListCache = null;
+async function getFullMarketList(){
+  if(fullMarketListCache) return fullMarketListCache;
+  const url = `https://raw.githubusercontent.com/${DATA_REPO}/${DATA_BRANCH}/data/codes.json`;
+  const res = await fetch(url, {cache:'no-store'});
+  if(!res.ok) throw new Error('拿不到全市场股票清单，可能还没跑过采集');
+  const list = await res.json();
+  fullMarketListCache = list.map(x=>({
+    code: codeToSecid(x.code), name: x.name || x.code, short: x.code, type:'stock'
+  })).filter(x=>x.code);
+  return fullMarketListCache;
+}
+
+// 并发跑一批异步任务，限制同时进行的数量，避免几千个请求一次性打出去
+async function poolRun(items, worker, concurrency, onProgress){
+  const results = new Array(items.length);
+  let i = 0, done = 0;
+  async function run(){
+    while(i < items.length){
+      const idx = i++;
+      try{ results[idx] = await worker(items[idx]); }
+      catch(e){ results[idx] = null; }
+      done++;
+      if(onProgress && done % 50 === 0) onProgress(done, items.length);
+    }
+  }
+  await Promise.all(Array.from({length:concurrency}, run));
+  if(onProgress) onProgress(items.length, items.length);
+  return results;
+}
+
 // 从接口返回的原始时间字符串里稳妥地抠出"HH:MM"，不依赖具体是几位日期前缀
 // （之前写死 slice(11) 是猜的格式，猜错了整根分时线的横坐标就全错）
 function extractHHMM(raw){
@@ -1215,34 +1247,35 @@ document.getElementById('run-select-btn').onclick = async ()=>{
     resultsEl.innerHTML = `<div class="hint">至少设置一个条件（不要全部留空/不限）</div>`;
     return;
   }
-  const wl = loadWatchlist();
-  if(!wl.length){
-    resultsEl.innerHTML = `<div class="hint">自选股池是空的，先加几只股票再跑选股</div>`;
-    return;
-  }
-  resultsEl.innerHTML = `<div class="hint">正在计算 ${wl.length} 只自选股…</div>`;
+  resultsEl.innerHTML = `<div class="hint">正在读取全市场股票清单…</div>`;
+  let list;
+  try{ list = await getFullMarketList(); }
+  catch(e){ resultsEl.innerHTML = `<div class="hint">${e.message}</div>`; return; }
 
+  resultsEl.innerHTML = `<div class="hint" id="scan-progress">正在扫描 0/${list.length}…</div>`;
   const neededLimit = estimateNeededBars(fromDate);
   const matched = [];
-  for(const item of wl){
-    try{
-      const entry = await buildStockEntry(item.code, neededLimit);
-      chipCache[item.code] = entry;
-      if(fromDate || toDate){
-        const hits = scanDateRange(entry, settings, fromDate, toDate);
-        if(hits.length) matched.push({ item, dates: hits });
-      }else{
-        if(evalSelectionAt(entry, settings, entry.bars.length-1)) matched.push({ item, dates:[entry.bars[entry.bars.length-1].date] });
-      }
-    }catch(e){ /* 单只股票失败就跳过，不影响其它 */ }
-  }
+
+  await poolRun(list, async (item)=>{
+    const entry = await buildStockEntry(item.code, neededLimit);
+    if(fromDate || toDate){
+      const hits = scanDateRange(entry, settings, fromDate, toDate);
+      if(hits.length) matched.push({ item, dates: hits });
+    }else{
+      if(evalSelectionAt(entry, settings, entry.bars.length-1)) matched.push({ item, dates:[entry.bars[entry.bars.length-1].date] });
+    }
+  }, 15, (done,total)=>{
+    const p = document.getElementById('scan-progress');
+    if(p) p.textContent = `正在扫描 ${done}/${total}…（已找到${matched.length}只符合）`;
+  });
 
   if(!matched.length){
-    resultsEl.innerHTML = `<div class="hint">没有符合条件的自选股</div>`;
+    resultsEl.innerHTML = `<div class="hint">扫描完成，没有符合条件的股票</div>`;
     return;
   }
-  resultsEl.innerHTML = '';
-  matched.forEach(({item, dates})=>{
+  resultsEl.innerHTML = `<div class="hint">扫描完成，共${matched.length}只符合</div>`;
+  const MAX_SEL_ROWS = 150;
+  matched.slice(0, MAX_SEL_ROWS).forEach(({item, dates})=>{
     const row = document.createElement('div');
     row.className = 'card';
     row.style.cursor = 'pointer';
@@ -1270,35 +1303,33 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
     resultsEl.innerHTML = `<div class="hint">至少设置一个条件（不要全部留空/不限）</div>`;
     return;
   }
-  const wl = loadWatchlist();
-  if(!wl.length){
-    resultsEl.innerHTML = `<div class="hint">自选股池是空的，先加几只股票再回测</div>`;
-    return;
-  }
-  resultsEl.innerHTML = `<div class="hint">正在回测 ${wl.length} 只自选股…</div>`;
+  resultsEl.innerHTML = `<div class="hint">正在读取全市场股票清单…</div>`;
+  let list;
+  try{ list = await getFullMarketList(); }
+  catch(e){ resultsEl.innerHTML = `<div class="hint">${e.message}</div>`; return; }
 
+  resultsEl.innerHTML = `<div class="hint" id="bt-progress">正在回测 0/${list.length}…</div>`;
   // 没填起始日期时，回测尽量拉长一些历史，样本才有意义
   const neededLimit = fromDate ? estimateNeededBars(fromDate) : 700;
   const perStock = [];
   let allTrades = [];
-  for(const item of wl){
-    try{
-      let entry = chipCache[item.code];
-      if(!entry || (entry.bars.length < neededLimit && entry.bars.length < 2000)){
-        const bars = await getHistBars(item.code, neededLimit);
-        const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
-        entry = { bars, cost50, cost75, cost90, zq1, zq };
-      }
-      const trades = backtestEntry(entry, settings, fromDate, toDate);
-      if(trades.length){
-        perStock.push({ item, trades });
-        allTrades = allTrades.concat(trades);
-      }
-    }catch(e){ /* 单只股票失败就跳过 */ }
-  }
+
+  await poolRun(list, async (item)=>{
+    const bars = await getHistBars(item.code, neededLimit);
+    const { cost50, cost75, cost90, zq1, zq } = computeIndicatorSeries(bars);
+    const entry = { bars, cost50, cost75, cost90, zq1, zq };
+    const trades = backtestEntry(entry, settings, fromDate, toDate);
+    if(trades.length){
+      perStock.push({ item, trades });
+      allTrades = allTrades.concat(trades);
+    }
+  }, 15, (done,total)=>{
+    const p = document.getElementById('bt-progress');
+    if(p) p.textContent = `正在回测 ${done}/${total}…（已找到${allTrades.length}次触发）`;
+  });
 
   if(!allTrades.length){
-    resultsEl.innerHTML = `<div class="hint">这套条件在自选股的历史里没有触发过（或者历史数据不够长）</div>`;
+    resultsEl.innerHTML = `<div class="hint">这套条件在全市场历史里没有触发过（或者历史数据不够长）</div>`;
     return;
   }
 
@@ -1314,7 +1345,7 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
   const summaryCard = document.createElement('div');
   summaryCard.className = 'card';
   summaryCard.innerHTML = `
-    <div style="font-size:13px; font-weight:600; margin-bottom:8px;">回测汇总（自选股整体，共${overall.n}次触发）</div>
+    <div style="font-size:13px; font-weight:600; margin-bottom:8px;">回测汇总（全市场，共${overall.n}次触发，涉及${perStock.length}只股票）</div>
     <div style="display:flex; gap:16px; font-size:13px;">
       <div><div style="color:var(--dim); font-size:11px;">胜率</div><div class="${overall.winRate>=50?'up':'down'}">${overall.winRate.toFixed(1)}%</div></div>
       <div><div style="color:var(--dim); font-size:11px;">平均涨幅</div><div class="${overall.avgRet>=0?'up':'down'}">${overall.avgRet>=0?'+':''}${overall.avgRet.toFixed(2)}%</div></div>
@@ -1322,7 +1353,8 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
   `;
   resultsEl.appendChild(summaryCard);
 
-  perStock.forEach(({item, trades})=>{
+  const MAX_ROWS = 150;
+  perStock.slice(0, MAX_ROWS).forEach(({item, trades})=>{
     const s = summarize(trades);
     const row = document.createElement('div');
     row.className = 'card';
@@ -1339,6 +1371,12 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
     row.onclick = ()=> openDetail(item);
     resultsEl.appendChild(row);
   });
+  if(perStock.length > MAX_ROWS){
+    const more = document.createElement('div');
+    more.className = 'hint';
+    more.textContent = `还有${perStock.length-MAX_ROWS}只没显示，条件收紧一些结果会更聚焦`;
+    resultsEl.appendChild(more);
+  }
 };
 
 // 详情页打开时，每 15 秒自动刷新分时（只在"跟随最新"时刷新；选中历史某天时数据不会变，不用刷）
@@ -1363,7 +1401,9 @@ async function checkDataStatus(){
     const meta = await res.json();
     const today = todayStrLocal();
     const isToday = meta.lastUpdateDate === today;
-    el.textContent = `全市场数据更新至 ${meta.lastUpdateDate}（共${meta.updated}只${meta.failed?`，失败${meta.failed}只`:''}）${isToday?'':' · 今天的数据靠实时行情临时补'}`;
+    const ranAt = meta.ranAt ? new Date(meta.ranAt) : null;
+    const timeStr = ranAt ? `${ranAt.getMonth()+1}/${ranAt.getDate()} ${String(ranAt.getHours()).padStart(2,'0')}:${String(ranAt.getMinutes()).padStart(2,'0')}` : '--';
+    el.textContent = `数据${meta.lastUpdateDate}｜${timeStr}跑的｜清单${meta.total}只，更新${meta.updated}只${meta.failed?`，失败${meta.failed}只`:''}${isToday?'':' · 今天靠实时行情临时补'}`;
   }catch(e){
     el.textContent = '数据状态：还没读到全市场采集记录（可能还没跑过，或者跑的时候失败了）';
   }
