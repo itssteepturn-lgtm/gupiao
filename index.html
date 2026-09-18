@@ -1403,7 +1403,7 @@ async function checkDataStatus(){
     const isToday = meta.lastUpdateDate === today;
     const ranAt = meta.ranAt ? new Date(meta.ranAt) : null;
     const timeStr = ranAt ? `${ranAt.getMonth()+1}/${ranAt.getDate()} ${String(ranAt.getHours()).padStart(2,'0')}:${String(ranAt.getMinutes()).padStart(2,'0')}` : '--';
-    el.textContent = `数据${meta.lastUpdateDate}｜${timeStr}跑的｜清单${meta.total}只，更新${meta.updated}只${meta.failed?`，失败${meta.failed}只`:''}${isToday?'':' · 今天靠实时行情临时补'}`;
+    el.textContent = `数据${meta.lastUpdateDate}｜${timeStr}跑的｜清单${meta.total}只，更新${meta.updated}只${meta.failed?`，失败${meta.failed}只`:''}${meta.note?` · ${meta.note}`:''}${isToday?'':' · 今天靠实时行情临时补'}`;
   }catch(e){
     el.textContent = '数据状态：还没读到全市场采集记录（可能还没跑过，或者跑的时候失败了）';
   }
