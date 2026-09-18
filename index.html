@@ -103,10 +103,13 @@
   <div class="section-label" style="margin-top:30px;">选股</div>
   <div class="card" style="font-size:13px;">
     <div style="color:var(--dim); margin-bottom:10px;">每个指标的选项不设置就是不限，都设置的话是AND组合。</div>
-    <div style="display:flex; align-items:center; gap:14px; margin-bottom:12px; font-size:12.5px;">
+    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; font-size:12.5px;">
       <span style="color:var(--dim);">板块</span>
-      <label><input type="checkbox" id="board-sh" checked> 上证</label>
-      <label><input type="checkbox" id="board-sz" checked> 深证</label>
+      <label><input type="checkbox" id="board-sh-main" checked> 沪主板</label>
+      <label><input type="checkbox" id="board-star" checked> 科创板</label>
+      <label><input type="checkbox" id="board-sz-main" checked> 深主板</label>
+      <label><input type="checkbox" id="board-chinext" checked> 创业板</label>
+      <label><input type="checkbox" id="board-bj" checked> 北交所</label>
     </div>
     <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
       <span style="width:60px; color:var(--dim); font-size:12.5px;">日期</span>
@@ -429,7 +432,7 @@ async function getHistoricalIntraday(secid, dateStr){
   const ymd = dateStr.replace(/-/g,'');
   const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
     `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
-    `&klt=1&fqt=0&beg=${ymd}&end=${ymd}&lmt=1000`;
+    `&klt=1&fqt=1&beg=${ymd}&end=${ymd}&lmt=1000`;
   const data = await getJSON(url);
   if(!data || !data.data || !data.data.klines || !data.data.klines.length){
     throw new Error('该日期没有分时数据（可能超出免费接口的保留范围）');
@@ -1173,7 +1176,8 @@ async function loadIntraday(){
       const p = n=>String(n).padStart(2,'0');
       tag.textContent = `更新于 ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }else{
-      const prevClose = await getPrevCloseUnadjusted(secid, targetDate);
+      const targetIdx = histBars.findIndex(b=>b.date===targetDate);
+      const prevClose = targetIdx>0 ? histBars[targetIdx-1].close : (histBars.length ? histBars[0].close : undefined);
       const trends = await getHistoricalIntraday(secid, targetDate);
       drawIntraday(minCanvas, trends, prevClose, limitPct);
       document.getElementById('intraday-date-tag').textContent = targetDate===today ? '(今日，官方数据)' : `(${targetDate})`;
@@ -1257,6 +1261,16 @@ function renderMatchRow(container, item, dates){
   container.appendChild(row);
 }
 
+function matchesBoardFilter(item){
+  const c = item.short;
+  if(document.getElementById('board-sh-main').checked && /^60/.test(c)) return true;
+  if(document.getElementById('board-star').checked && /^68/.test(c)) return true;
+  if(document.getElementById('board-sz-main').checked && /^00/.test(c)) return true;
+  if(document.getElementById('board-chinext').checked && /^(300|301)/.test(c)) return true;
+  if(document.getElementById('board-bj').checked && /^(4|8)/.test(c)) return true;
+  return false;
+}
+
 document.getElementById('stop-scan-btn').onclick = ()=>{ scanCancelled = true; };
 
 document.getElementById('run-select-btn').onclick = async ()=>{
@@ -1264,8 +1278,7 @@ document.getElementById('run-select-btn').onclick = async ()=>{
   const resultsEl = document.getElementById('select-results');
   const fromDate = document.getElementById('sel-date-from').value || null;
   const toDate = document.getElementById('sel-date-to').value || null;
-  const wantSh = document.getElementById('board-sh').checked;
-  const wantSz = document.getElementById('board-sz').checked;
+
 
   if(!hasAnyActiveFilter(settings)){
     resultsEl.innerHTML = `<div class="hint">至少设置一个条件（不要全部留空/不限）</div>`;
@@ -1275,7 +1288,7 @@ document.getElementById('run-select-btn').onclick = async ()=>{
   let list;
   try{ list = await getFullMarketList(); }
   catch(e){ resultsEl.innerHTML = `<div class="hint">${e.message}</div>`; return; }
-  list = list.filter(x => (wantSh && x.code.startsWith('1.')) || (wantSz && x.code.startsWith('0.')));
+  list = list.filter(matchesBoardFilter);
 
   scanCancelled = false;
   document.getElementById('stop-scan-btn').style.display = 'block';
@@ -1321,8 +1334,7 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
   const resultsEl = document.getElementById('backtest-results');
   const fromDate = document.getElementById('sel-date-from').value || null;
   const toDate = document.getElementById('sel-date-to').value || null;
-  const wantSh = document.getElementById('board-sh').checked;
-  const wantSz = document.getElementById('board-sz').checked;
+
 
   if(!hasAnyActiveFilter(settings)){
     resultsEl.innerHTML = `<div class="hint">至少设置一个条件（不要全部留空/不限）</div>`;
@@ -1332,7 +1344,7 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
   let list;
   try{ list = await getFullMarketList(); }
   catch(e){ resultsEl.innerHTML = `<div class="hint">${e.message}</div>`; return; }
-  list = list.filter(x => (wantSh && x.code.startsWith('1.')) || (wantSz && x.code.startsWith('0.')));
+  list = list.filter(matchesBoardFilter);
 
   scanCancelled = false;
   document.getElementById('stop-scan-btn').style.display = 'block';
