@@ -1149,18 +1149,22 @@ async function loadIntraday(){
   const minCanvas = document.getElementById('chart-min');
   const tag = document.getElementById('detail-refresh');
   const secid = currentIdx.code;
-  const lastBar = dayChartBars[dayChartBars.length-1];
-  const isLiveDay = selectedBarIndex==null || (dayChartBars[selectedBarIndex] && dayChartBars[selectedBarIndex].date===lastBar?.date);
+  const today = todayStrLocal();
+  const targetDate = (selectedBarIndex!=null && dayChartBars[selectedBarIndex]) ? dayChartBars[selectedBarIndex].date : today;
   const limitPct = currentIdx.type==='stock' ? limitPctForStock(currentIdx.short, currentIdx.name) : null;
 
+  // 只有目标日期就是"今天"、而且官方数据还没收录今天的时候，才走实时接口；
+  // 只要官方数据已经有了这一天（哪怕就是今天），一律当"已收盘的历史日"处理——
+  // 收盘后继续调用实时接口，行为并不可靠（这正是之前分时图显示不正常的根因）
+  const histBars = currentIdx.type==='stock'
+    ? await getHistBars(secid, 480)
+    : (chipCache[secid]?.bars || await getDailyKline(secid, 60));
+  const hasOfficialForTarget = histBars.some(b=>b.date===targetDate);
+  const isLive = (targetDate===today) && !hasOfficialForTarget;
+
   try{
-    if(isLiveDay){
+    if(isLive){
       const trends = await getIntraday(secid);
-      // "昨收"基准价必须来自纯历史（已收盘）数据，不能用可能带着"今天临时行情"的缓存——
-      // 不然基准价会不断被当前价自己污染，涨跌幅永远趋近于0%，坐标轴也会跟着全错
-      const histBars = currentIdx.type==='stock'
-        ? await getHistBars(secid, 480)
-        : (chipCache[secid]?.bars || await getDailyKline(secid, 60));
       const prevClose = histBars.length>0 ? histBars[histBars.length-1].close : undefined;
       drawIntraday(minCanvas, trends, prevClose, limitPct);
       document.getElementById('intraday-date-tag').textContent = '';
@@ -1169,16 +1173,15 @@ async function loadIntraday(){
       const p = n=>String(n).padStart(2,'0');
       tag.textContent = `更新于 ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }else{
-      const bar = dayChartBars[selectedBarIndex];
-      const prevClose = await getPrevCloseUnadjusted(secid, bar.date);
-      const trends = await getHistoricalIntraday(secid, bar.date);
+      const prevClose = await getPrevCloseUnadjusted(secid, targetDate);
+      const trends = await getHistoricalIntraday(secid, targetDate);
       drawIntraday(minCanvas, trends, prevClose, limitPct);
-      document.getElementById('intraday-date-tag').textContent = `(${bar.date})`;
-      document.getElementById('back-to-live').style.display = 'inline';
-      tag.textContent = `显示 ${bar.date} 的分时`;
+      document.getElementById('intraday-date-tag').textContent = targetDate===today ? '(今日，官方数据)' : `(${targetDate})`;
+      document.getElementById('back-to-live').style.display = selectedBarIndex!=null ? 'inline' : 'none';
+      tag.textContent = `显示 ${targetDate} 的分时`;
     }
   }catch(e){
-    tag.textContent = isLiveDay ? '分时加载失败，下拉重试' : (e.message || '这个日期的分时数据拿不到（免费接口通常只保留近期分时数据）');
+    tag.textContent = isLive ? '分时加载失败，下拉重试' : (e.message || '这个日期的分时数据拿不到（免费接口通常只保留近期分时数据）');
     minCanvas.getContext('2d').clearRect(0,0,minCanvas.width,minCanvas.height);
   }
 }
