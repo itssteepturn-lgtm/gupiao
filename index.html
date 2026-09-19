@@ -103,13 +103,12 @@
   <div class="section-label" style="margin-top:30px;">选股</div>
   <div class="card" style="font-size:13px;">
     <div style="color:var(--dim); margin-bottom:10px;">每个指标的选项不设置就是不限，都设置的话是AND组合。</div>
-    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; font-size:12.5px;">
-      <span style="color:var(--dim);">板块</span>
-      <label><input type="checkbox" id="board-sh-main" checked> 沪主板</label>
-      <label><input type="checkbox" id="board-star" checked> 科创板</label>
-      <label><input type="checkbox" id="board-sz-main" checked> 深主板</label>
-      <label><input type="checkbox" id="board-chinext" checked> 创业板</label>
-      <label><input type="checkbox" id="board-bj" checked> 北交所</label>
+    <div style="display:flex; flex-wrap:nowrap; align-items:center; gap:6px; margin-bottom:12px; font-size:11.5px; overflow-x:auto;">
+      <label style="white-space:nowrap;"><input type="checkbox" id="board-sh-main" checked> 沪市</label>
+      <label style="white-space:nowrap;"><input type="checkbox" id="board-sz-main" checked> 深市</label>
+      <label style="white-space:nowrap;"><input type="checkbox" id="board-chinext" checked> 创业</label>
+      <label style="white-space:nowrap;"><input type="checkbox" id="board-star" checked> 科创</label>
+      <label style="white-space:nowrap;"><input type="checkbox" id="board-bj" checked> 北交</label>
     </div>
     <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
       <span style="width:60px; color:var(--dim); font-size:12.5px;">日期</span>
@@ -436,6 +435,13 @@ async function getHistoricalIntraday(secid, dateStr){
   const data = await getJSON(url);
   if(!data || !data.data || !data.data.klines || !data.data.klines.length){
     throw new Error('该日期没有分时数据（可能超出免费接口的保留范围）');
+  }
+  // 这个接口有个坑：请求的日期太久远、超出它的保留范围时，不会报错，
+  // 而是偷偷返回别的日期（通常是最近能拿到的）数据——必须验证返回的日期
+  // 真的等于我们请求的日期，不然会出现"看着有数据，其实是别的日子"的情况
+  const firstRowDate = data.data.klines[0].split(',')[0].slice(0,10);
+  if(firstRowDate !== dateStr){
+    throw new Error(`该日期没有分时数据（接口返回的是${firstRowDate}的数据，超出保留范围）`);
   }
   return data.data.klines.map(row=>{
     const f = row.split(',');
@@ -1148,22 +1154,33 @@ async function loadMainAndSub(){
   }
 }
 
+function isLikelyTradingNow(){
+  const d = new Date();
+  const day = d.getDay(); // 0=周日 6=周六
+  if(day===0 || day===6) return false;
+  const mins = d.getHours()*60+d.getMinutes();
+  return (mins>=9*60+15 && mins<=11*60+35) || (mins>=12*60+55 && mins<=15*60+5);
+}
+
 async function loadIntraday(){
   const minCanvas = document.getElementById('chart-min');
   const tag = document.getElementById('detail-refresh');
   const secid = currentIdx.code;
   const today = todayStrLocal();
-  const targetDate = (selectedBarIndex!=null && dayChartBars[selectedBarIndex]) ? dayChartBars[selectedBarIndex].date : today;
+  let targetDate = (selectedBarIndex!=null && dayChartBars[selectedBarIndex]) ? dayChartBars[selectedBarIndex].date : today;
   const limitPct = currentIdx.type==='stock' ? limitPctForStock(currentIdx.short, currentIdx.name) : null;
 
-  // 只有目标日期就是"今天"、而且官方数据还没收录今天的时候，才走实时接口；
-  // 只要官方数据已经有了这一天（哪怕就是今天），一律当"已收盘的历史日"处理——
-  // 收盘后继续调用实时接口，行为并不可靠（这正是之前分时图显示不正常的根因）
+  // 只有目标日期就是"今天"、而且官方数据还没收录今天、并且现在确实是交易时段的时候，
+  // 才走实时接口；周末/收盘后/还没开盘这些时候，实时接口查"今天"只会拿到冻结的怪数据
+  // （这正是分时图老是显示不正常的根因），这种情况直接退回显示最近一个真实交易日
   const histBars = currentIdx.type==='stock'
     ? await getHistBars(secid, 480)
     : (chipCache[secid]?.bars || await getDailyKline(secid, 60));
   const hasOfficialForTarget = histBars.some(b=>b.date===targetDate);
-  const isLive = (targetDate===today) && !hasOfficialForTarget;
+  let isLive = (targetDate===today) && !hasOfficialForTarget && isLikelyTradingNow();
+  if(!isLive && targetDate===today && !hasOfficialForTarget && histBars.length){
+    targetDate = histBars[histBars.length-1].date; // 退回最近一个真实交易日
+  }
 
   try{
     if(isLive){
