@@ -482,7 +482,7 @@ class ChipModel{
     this.w = new Float64Array(buckets);
   }
   priceAt(i){ return this.min + (i+0.5)*this.step; }
-  idxOf(p){ return Math.min(this.n-1, Math.max(0, Math.floor((p-this.min)/this.step))); }
+  idxOf(p){ const i=Math.floor((p-this.min)/this.step); return isFinite(i) ? Math.min(this.n-1, Math.max(0, i)) : 0; }
 
   addDay(low, high, avg, turnoverPct){
     const turnover = Math.max(0, Math.min(1, turnoverPct/100));
@@ -542,7 +542,8 @@ function computeIndicatorSeries(bars){
 
   for(let i=0;i<bars.length;i++){
     const b = bars[i];
-    const avg = b.vol>0 ? b.amount/(b.vol*100) : b.close; // 当日均价（VOL 单位：手）
+    let avg = b.vol>0 ? b.amount/(b.vol*100) : b.close; // 当日均价（VOL 单位：手）
+    if(!isFinite(avg) || avg<=0) avg = b.close;
     model.addDay(b.low, b.high, avg, b.turnover);
 
     cost50.push(model.percentile(50));
@@ -552,7 +553,8 @@ function computeIndicatorSeries(bars){
     // VWMA90（公式里其实是10日量加权均价，命名沿用原公式）
     const win = bars.slice(Math.max(0,i-9), i+1);
     const sumVol = win.reduce((s,x)=>s+x.vol,0);
-    const vwma = sumVol>0 ? win.reduce((s,x)=>s+x.close*x.vol,0)/sumVol : b.close;
+    let vwma = sumVol>0 ? win.reduce((s,x)=>s+x.close*x.vol,0)/sumVol : b.close;
+    if(!isFinite(vwma) || vwma<=0) vwma = b.close;
 
     zq1.push(model.winnerBelow(vwma));
     zq.push(model.winnerBelow(avg));
