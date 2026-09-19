@@ -262,7 +262,22 @@ async function getIntradayTencent(secid){
   });
 }
 
+async function getLocalIndexHistory(secid){
+  const [market, code] = secid.split('.');
+  const filename = (market==='1'?'sh':'sz') + code;
+  const url = `https://raw.githubusercontent.com/${DATA_REPO}/${DATA_BRANCH}/data/indices/${filename}.json`;
+  const res = await fetch(url, {cache:'no-store'});
+  if(!res.ok) throw new Error('no local index data');
+  const arr = await res.json();
+  if(!Array.isArray(arr) || arr.length < 10) throw new Error('local index data too short');
+  return arr;
+}
+
 async function getDailyKline(secid, limit=60){
+  try{
+    const local = await getLocalIndexHistory(secid);
+    return local.slice(-limit);
+  }catch(e){ /* 没有本地指数数据（比如北证50），走下面的实时接口 */ }
   try{
     const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
       `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
