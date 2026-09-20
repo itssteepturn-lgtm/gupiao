@@ -277,7 +277,11 @@ async function getDailyKline(secid, limit=60){
   try{
     const local = await getLocalIndexHistory(secid);
     return local.slice(-limit);
-  }catch(e){ /* 没有本地指数数据（比如北证50），走下面的实时接口 */ }
+  }catch(e){}
+  try{
+    const local = await getLocalHistory(secid);
+    return local.slice(-limit);
+  }catch(e){}
   try{
     const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
       `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58`+
@@ -1116,6 +1120,12 @@ function openDetail(idx){
   document.getElementById('cost-legend').style.display = idx.type==='stock' ? 'flex' : 'none';
   document.getElementById('intraday-date-tag').textContent = '';
   document.getElementById('back-to-live').style.display = 'none';
+  document.getElementById('today-source-tag').textContent = '';
+  document.getElementById('detail-refresh').textContent = '加载中…';
+  ['chart-day','chart-min','chart-sub'].forEach(id=>{
+    const c = document.getElementById(id);
+    c.getContext('2d').clearRect(0,0,c.width,c.height);
+  });
   updateAddWatchBtn();
   loadMainAndSub();
   loadIntraday();
