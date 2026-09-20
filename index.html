@@ -1111,9 +1111,12 @@ let dayChartBars = [];      // 当前主图显示的那一段 bars（用于十�
 let selectedBarIndex = null; // null = 跟随最新
 const chipCache = {}; // secid -> {bars, cost50, cost75, cost90, zq1, zq}
 
+let detailLoadToken = 0;
+
 function openDetail(idx){
   currentIdx = idx;
   selectedBarIndex = null;
+  detailLoadToken++;
   document.getElementById('detail-title').textContent = idx.name;
   document.getElementById('detail').classList.add('open');
   document.getElementById('subchart-section').style.display = idx.type==='stock' ? 'block' : 'none';
@@ -1149,6 +1152,7 @@ function updateAddWatchBtn(){
 }
 
 async function loadMainAndSub(){
+  const myToken = detailLoadToken;
   const secid = currentIdx.code;
   const tag = document.getElementById('detail-refresh');
   const sourceTag = document.getElementById('today-source-tag');
@@ -1158,6 +1162,7 @@ async function loadMainAndSub(){
     if(currentIdx.type==='stock'){
       tag.textContent = '正在计算筹码分布…';
       const entry = await buildStockEntry(secid, 480);
+      if(myToken !== detailLoadToken) return; // 期间用户已经切换到别的股票，这份结果作废
       chipCache[secid] = entry;
       const lastDate = entry.bars.length ? entry.bars[entry.bars.length-1].date : null;
       sourceTag.textContent = entry.liveOverlay
@@ -1172,12 +1177,13 @@ async function loadMainAndSub(){
     }else{
       // 指数：不需要COST/副图，用普通日K，也存到 chipCache 里方便算涨跌幅用的 bars
       const klines = cache[secid]?.klines || await getDailyKline(secid, 60);
+      if(myToken !== detailLoadToken) return;
       chipCache[secid] = { bars: klines };
       dayChartBars = klines;
       drawMainWithCost(dayCanvas, dayChartBars, [], [], [], selectedBarIndex);
     }
   }catch(e){
-    tag.textContent = '日K加载失败';
+    if(myToken === detailLoadToken) tag.textContent = '日K加载失败';
   }
 }
 
@@ -1190,6 +1196,7 @@ function isLikelyTradingNow(){
 }
 
 async function loadIntraday(){
+  const myToken = detailLoadToken;
   const minCanvas = document.getElementById('chart-min');
   const tag = document.getElementById('detail-refresh');
   const secid = currentIdx.code;
@@ -1203,6 +1210,7 @@ async function loadIntraday(){
   const histBars = currentIdx.type==='stock'
     ? await getHistBars(secid, 480)
     : (chipCache[secid]?.bars || await getDailyKline(secid, 60));
+  if(myToken !== detailLoadToken) return;
   const hasOfficialForTarget = histBars.some(b=>b.date===targetDate);
   let isLive = (targetDate===today) && !hasOfficialForTarget && isLikelyTradingNow();
   if(!isLive && targetDate===today && !hasOfficialForTarget && histBars.length){
@@ -1212,6 +1220,7 @@ async function loadIntraday(){
   try{
     if(isLive){
       const trends = await getIntraday(secid);
+      if(myToken !== detailLoadToken) return;
       const prevClose = histBars.length>0 ? histBars[histBars.length-1].close : undefined;
       drawIntraday(minCanvas, trends, prevClose, limitPct);
       document.getElementById('intraday-date-tag').textContent = '';
@@ -1223,12 +1232,14 @@ async function loadIntraday(){
       const targetIdx = histBars.findIndex(b=>b.date===targetDate);
       const prevClose = targetIdx>0 ? histBars[targetIdx-1].close : (histBars.length ? histBars[0].close : undefined);
       const trends = await getHistoricalIntraday(secid, targetDate);
+      if(myToken !== detailLoadToken) return;
       drawIntraday(minCanvas, trends, prevClose, limitPct);
       document.getElementById('intraday-date-tag').textContent = targetDate===today ? '(今日，官方数据)' : `(${targetDate})`;
       document.getElementById('back-to-live').style.display = selectedBarIndex!=null ? 'inline' : 'none';
       tag.textContent = `显示 ${targetDate} 的分时`;
     }
   }catch(e){
+    if(myToken !== detailLoadToken) return;
     tag.textContent = isLive ? '分时加载失败，下拉重试' : (e.message || '这个日期的分时数据拿不到（免费接口通常只保留近期分时数据）');
     minCanvas.getContext('2d').clearRect(0,0,minCanvas.width,minCanvas.height);
   }
@@ -1356,7 +1367,7 @@ document.getElementById('run-select-btn').onclick = async ()=>{
       matchCount++;
       if(matchCount <= MAX_SEL_ROWS) renderMatchRow(matchCountEl, item, dates);
     }
-  }, 30, (done,total)=>{
+  }, 50, (done,total)=>{
     const p = document.getElementById('scan-progress');
     if(p) p.textContent = `${scanCancelled?'已停止':'正在扫描'} ${done}/${total}…（已找到${matchCount}只符合）`;
   });
@@ -1407,7 +1418,7 @@ document.getElementById('run-backtest-btn').onclick = async ()=>{
       perStock.push({ item, trades });
       allTrades = allTrades.concat(trades);
     }
-  }, 30, (done,total)=>{
+  }, 50, (done,total)=>{
     const p = document.getElementById('bt-progress');
     if(p) p.textContent = `${scanCancelled?'已停止':'正在回测'} ${done}/${total}…（已找到${allTrades.length}次触发）`;
   });
