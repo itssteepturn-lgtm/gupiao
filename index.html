@@ -351,6 +351,7 @@ async function getLiveQuoteBar(secid){
   if(!data || !data.data) throw new Error('no live quote');
   const d = data.data;
   if(d.f43==null || d.f43==='-') throw new Error('停牌或无效行情');
+  if(!d.f47 || +d.f47<=0) throw new Error('今天还没有实际成交（非交易日，或还没开盘）');
   return {
     date: todayStrLocal(),
     open:+d.f46, close:+d.f43, high:+d.f44, low:+d.f45,
@@ -367,21 +368,13 @@ async function getHistBars(secid, limit){
   return bars;
 }
 
-// 组一份完整的"计算用"数据：历史收盘数据 + （如果今天还没被正式采集）临时拼一条今天的实时数据
-function hasMarketOpenedToday(){
-  const d = new Date();
-  const day = d.getDay();
-  if(day===0 || day===6) return false; // 周末
-  const mins = d.getHours()*60+d.getMinutes();
-  return mins >= 9*60+30; // 9:30之前，实时行情只会是上一交易日的冻结值，不能当"今天"用
-}
 
 async function buildStockEntry(secid, limit){
   const histBars = await getHistBars(secid, limit);
   let bars = histBars;
   const today = todayStrLocal();
   let liveOverlay = false;
-  if((!bars.length || bars[bars.length-1].date !== today) && hasMarketOpenedToday()){
+  if(!bars.length || bars[bars.length-1].date !== today){
     try{
       const liveBar = await getLiveQuoteBar(secid);
       if(liveBar.date === today){ bars = bars.concat([liveBar]); liveOverlay = true; }
@@ -1248,8 +1241,8 @@ async function loadIntraday(){
     }
   }catch(e){
     if(myToken !== detailLoadToken) return;
-    tag.textContent = isLive ? '分时加载失败，下拉重试' : (e.message || '这个日期的分时数据拿不到（免费接口通常只保留近期分时数据）');
-    minCanvas.getContext('2d').clearRect(0,0,minCanvas.width,minCanvas.height);
+    tag.textContent = isLive ? '分时暂时刷新失败（比如午休），保留上次画面' : (e.message || '这个日期的分时数据拿不到（免费接口通常只保留近期分时数据）');
+    if(!isLive) minCanvas.getContext('2d').clearRect(0,0,minCanvas.width,minCanvas.height);
   }
 }
 
@@ -1307,20 +1300,29 @@ document.getElementById('back-btn').onclick = ()=>{
   document.getElementById('detail').classList.remove('open');
 };
 
+const visitedStocks = new Set(); // 记住看过哪些，选股结果里点开过的会变灰
+
 function renderMatchRow(container, item, dates){
   const row = document.createElement('div');
   row.className = 'card';
   row.style.cursor = 'pointer';
+  const visited = visitedStocks.has(item.short);
+  if(visited) row.style.opacity = '0.5';
   const dateTags = dates.slice(0,8).map(d=>`<span style="display:inline-block; background:#0d1117; border:1px solid var(--line); border-radius:4px; padding:2px 6px; margin:2px 4px 0 0; font-size:11px; color:var(--dim);">${d}</span>`).join('');
   const more = dates.length>8 ? `<span style="color:var(--dim); font-size:11px;">等共${dates.length}天</span>` : '';
   row.innerHTML = `
     <div class="idx-row" style="margin-bottom:${dates.length?'6px':'0'};">
       <div class="idx-name" style="width:auto; flex:1;"><div class="n">${item.name}</div><div class="c">${item.short}</div></div>
-      <div style="font-size:12px; color:var(--accent);">符合</div>
+      <div style="font-size:12px; color:var(--accent);">${visited?'已看过':'符合'}</div>
     </div>
     <div>${dateTags}${more}</div>
   `;
-  row.onclick = ()=> openDetail(item);
+  row.onclick = ()=>{
+    visitedStocks.add(item.short);
+    row.style.opacity = '0.5';
+    row.querySelector('.idx-row > div:last-child').textContent = '已看过';
+    openDetail(item);
+  };
   container.appendChild(row);
 }
 
@@ -1516,7 +1518,7 @@ async function checkDataStatus(){
 document.getElementById('data-status-refresh').onclick = ()=>{
   window.open(`https://github.com/${DATA_REPO}/actions/workflows/daily-data.yml`, '_blank');
 };
-setInterval(checkDataStatus, 60000);
+// 只在打开页面时查一次，我们已经有自己的数据库了，没必要一直反复检查
 
 // 自选股在主列表可见时，每 20 秒刷新一次价格（分时详情页有自己的15秒刷新，互不影响）
 setInterval(()=>{
