@@ -273,7 +273,7 @@ async function getLocalIndexHistory(secid){
   return arr;
 }
 
-async function getDailyKline(secid, limit=60){
+async function getDailyKlineRaw(secid, limit){
   try{
     const local = await getLocalIndexHistory(secid);
     return local.slice(-limit);
@@ -296,6 +296,20 @@ async function getDailyKline(secid, limit=60){
   }catch(e){
     return await getDailyKlineTencent(secid, limit); // 东方财富整体失败时兜底
   }
+}
+
+async function getDailyKline(secid, limit=60){
+  const bars = await getDailyKlineRaw(secid, limit);
+  const today = todayStrLocal();
+  if(bars.length && bars[bars.length-1].date === today) return bars;
+  try{
+    const liveBar = await getLiveQuoteBar(secid);
+    const prevBar = bars.length ? bars[bars.length-1] : null;
+    if(liveBar.date === today && isValidLiveBar(liveBar, prevBar)){
+      return bars.concat([liveBar]);
+    }
+  }catch(e){ /* 拿不到实时行情，就只显示已收盘的历史 */ }
+  return bars;
 }
 
 // ↓↓↓ 把这里改成你那个【公开数据仓库】的 用户名/仓库名，分支名一般是 main ↓↓↓
@@ -369,6 +383,14 @@ async function getHistBars(secid, limit){
 }
 
 
+function isValidLiveBar(liveBar, prevBar){
+  const vals = [liveBar.open, liveBar.high, liveBar.low, liveBar.close];
+  if(vals.some(v => !isFinite(v) || v<=0)) return false; // 有非法数值，会把图表坐标轴拉爆
+  if(prevBar && liveBar.open===prevBar.open && liveBar.high===prevBar.high &&
+     liveBar.low===prevBar.low && liveBar.close===prevBar.close) return false; // 跟昨天一模一样，是冻结的旧数据被错标成"今天"
+  return true;
+}
+
 async function buildStockEntry(secid, limit){
   const histBars = await getHistBars(secid, limit);
   let bars = histBars;
@@ -377,7 +399,11 @@ async function buildStockEntry(secid, limit){
   if(!bars.length || bars[bars.length-1].date !== today){
     try{
       const liveBar = await getLiveQuoteBar(secid);
-      if(liveBar.date === today){ bars = bars.concat([liveBar]); liveOverlay = true; }
+      const prevBar = bars.length ? bars[bars.length-1] : null;
+      if(liveBar.date === today && isValidLiveBar(liveBar, prevBar)){
+        bars = bars.concat([liveBar]);
+        liveOverlay = true;
+      }
     }catch(e){
       // 拿不到实时行情（比如停牌），就只用已收盘的历史，不强求
     }
@@ -904,7 +930,7 @@ function drawMainWithCost(canvas, bars, cost50, cost75, cost90, highlightIndex){
   const allVals = [
     ...bars.map(b=>b.high), ...bars.map(b=>b.low),
     ...cost50.filter(v=>v!=null), ...cost75.filter(v=>v!=null), ...cost90.filter(v=>v!=null)
-  ];
+  ].filter(v => isFinite(v) && v>0);
   const max = Math.max(...allVals), min = Math.min(...allVals);
   const range = (max-min) || 1;
   const n = bars.length;
